@@ -103,6 +103,8 @@ def run_fanbeam_experiment(
         tvals = compute_intersections_2d_torch(n_row, n_col, A, b, src, dst)
     else:  # CUDA
         tvals = compute_intersections_2d_cuda(n_row, n_col, A, b, src, dst)
+        # sync
+        torch.cuda.synchronize()
     t1 = time.perf_counter()
     intersection_time = t1 - t0
     print(f"[{backend}] Intersections computed in {intersection_time:.4f} s.")
@@ -113,6 +115,8 @@ def run_fanbeam_experiment(
         sinogram_1d = forward_project_2d_torch(phantom, tvals, A, b, src, dst)
     else:  # CUDA
         sinogram_1d = forward_project_2d_cuda(phantom, tvals, A, b, src, dst)
+        # sync
+        torch.cuda.synchronize()
     t3 = time.perf_counter()
     forward_time = t3 - t2
     print(f"[{backend}] Forward projection completed in {forward_time:.4f} s.")
@@ -123,6 +127,8 @@ def run_fanbeam_experiment(
         reco = back_project_2d_torch(sinogram_1d, tvals, A, b, src, dst, n_row, n_col)
     else:  # CUDA
         reco = back_project_2d_cuda(sinogram_1d, tvals, A, b, src, dst, n_row, n_col)
+        torch.cuda.synchronize()
+        
     t5 = time.perf_counter()
     backward_time = t5 - t4
     print(f"[{backend}] Back projection completed in {backward_time:.4f} s.")

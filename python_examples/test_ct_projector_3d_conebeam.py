@@ -121,6 +121,7 @@ def run_conebeam_experiment(
         tvals = compute_intersections_3d_torch(n_x, n_y, n_z, A, b, src, dst)
     else:  # CUDA
         tvals = compute_intersections_3d_cuda(n_x, n_y, n_z, A, b, src, dst)
+        torch.cuda.synchronize()  # Ensure all CUDA operations are complete
     t1 = time.perf_counter()
     intersection_time = t1 - t0
     print(f"[{backend}] Intersections computed in {intersection_time:.4f} s.")
@@ -131,6 +132,8 @@ def run_conebeam_experiment(
         sinogram_1d = forward_project_3d_torch(volume, tvals, A, b, src, dst)
     else:  # CUDA
         sinogram_1d = forward_project_3d_cuda(volume, tvals, A, b, src, dst)
+        torch.cuda.synchronize()  # Ensure all CUDA operations are complete
+
     t3 = time.perf_counter()
     forward_time = t3 - t2
     print(f"[{backend}] Forward projection completed in {forward_time:.4f} s.")
@@ -141,6 +144,7 @@ def run_conebeam_experiment(
         reco = back_project_3d_torch(sinogram_1d, tvals, A, b, src, dst, n_x, n_y, n_z)
     else:  # CUDA
         reco = back_project_3d_cuda(sinogram_1d, tvals, A, b, src, dst, n_x, n_y, n_z)
+        torch.cuda.synchronize()  # Ensure all CUDA operations are complete
     t5 = time.perf_counter()
     backward_time = t5 - t4
     print(f"[{backend}] Back projection completed in {backward_time:.4f} s.")

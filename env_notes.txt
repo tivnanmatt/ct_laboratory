@@ -1,21 +1,17 @@
-conda create -y --name ct_lab
-conda activate ct_lab
+conda create -y --name ct_laboratory
+conda activate ct_laboratory
 conda install -y python=3.12 
 conda install -y nvidia/label/cuda-12.4.1::cuda-toolkit
 conda install -y -c conda-forge gcc=12 gxx=12
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-pip install ninja
 
-
-
-
-
-pip ffmpeg
-conda install nvidia/label/cuda-12.4.1::cuda-toolkit
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+pip3 install ninja
+pip3 install ffmpeg
 pip3 install numpy scipy matplotlib pandas scikit-learn scikit-image seaborn 
 pip3 install nibabel pydicom
 pip3 install transformers diffusers accelerate datasets
 pip3 install torch-ema
+pip3 install wandb
 
 pip3 install git+https://github.com/Generative-Medical-Imaging-Lab/gmi.git
 

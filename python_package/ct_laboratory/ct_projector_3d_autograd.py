@@ -33,10 +33,12 @@ class CTProjector3DFunction(torch.autograd.Function):
         ctx.backend = backend
         ctx.volume_shape = volume.shape
 
-        if backend == 'torch':
-            sinogram = forward_project_3d_torch(volume, tvals, M, b, src, dst)
-        else:
-            sinogram = forward_project_3d_cuda(volume, tvals, M, b, src, dst)
+        # if backend == 'torch':
+        #     sinogram = forward_project_3d_torch(volume, tvals, M, b, src, dst)
+        # else:
+        #     sinogram = forward_project_3d_cuda(volume, tvals, M, b, src, dst)
+
+        sinogram = forward_project_3d_torch(volume, tvals, M, b, src, dst) 
 
         return sinogram
 
@@ -56,14 +58,17 @@ class CTProjector3DFunction(torch.autograd.Function):
             # volume_shape = [B, n_x, n_y, n_z]
             _, n_x, n_y, n_z = volume_shape
 
-        if backend == 'torch':
-            grad_volume = back_project_3d_torch(
-                grad_output, tvals, M, b, src, dst, n_x, n_y, n_z
-            )
-        else:
-            grad_volume = back_project_3d_cuda(
-                grad_output, tvals, M, b, src, dst, n_x, n_y, n_z
-            )
+        # if backend == 'torch':
+        #     grad_volume = back_project_3d_torch(
+        #         grad_output, tvals, M, b, src, dst, n_x, n_y, n_z
+        #     )
+        # else:
+        #     grad_volume = back_project_3d_cuda(
+        #         grad_output, tvals, M, b, src, dst, n_x, n_y, n_z
+        #     )
+        grad_volume = back_project_3d_torch(
+            grad_output, tvals, M, b, src, dst, n_x, n_y, n_z
+        )
 
         # Return gradient w.r.t. volume only
         return grad_volume, None, None, None, None, None, None
