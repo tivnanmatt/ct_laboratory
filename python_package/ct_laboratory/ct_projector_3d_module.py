@@ -13,17 +13,17 @@ import gc
 
 class CTProjector3DModule(torch.nn.Module):
     """
-    Computes the 3D intersections in __init__ and stores them.
-    Then uses the CTProjector3DFunction for forward/backward passes.
+    CT projector module supporting precomputed or on-the-fly Siddon projection.
     """
-    def __init__(self, n_x, n_y, n_z, M, b, src, dst, backend='torch', device=None):
+    def __init__(self, n_x, n_y, n_z, M, b, src, dst,
+                 backend='torch', device=None, precomputed_intersections=False):
         """
         n_x, n_y, n_z: volume shape
         M, b: 3D transform (3x3, 3x1)
         src, dst: [n_ray, 3]
         backend: 'torch' or 'cuda'
+        precomputed_intersections: if True, uses precomputed Siddon t-values
         """
-        
         super().__init__()
 
         if device is None:
@@ -33,35 +33,33 @@ class CTProjector3DModule(torch.nn.Module):
         self.n_x = n_x
         self.n_y = n_y
         self.n_z = n_z
+        self.precomputed_intersections = precomputed_intersections
 
-        # Register geometry
+        # Register geometry buffers
         self.register_buffer('M', M)
         self.register_buffer('b', b)
         self.register_buffer('src', src)
         self.register_buffer('dst', dst)
 
-        # Precompute intersections
-        if backend == 'torch':
-            tvals = compute_intersections_3d_torch(n_x, n_y, n_z, M, b, src, dst)
+        # Either precompute or defer to on-the-fly Siddon
+        if precomputed_intersections:
+            if backend == 'torch':
+                tvals = compute_intersections_3d_torch(n_x, n_y, n_z, M, b, src, dst)
+            else:
+                tvals = compute_intersections_3d_cuda(n_x, n_y, n_z, M, b, src, dst)
+
+            # Trim trailing INFINITY-only columns
+            n_intersections = tvals.shape[1]
+            for i in range(n_intersections):
+                if torch.all(torch.isinf(tvals[:, i])):
+                    tvals = tvals.narrow(1, 0, i)
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    break
+            tvals = tvals.contiguous()
+            self.register_buffer('tvals', tvals)
         else:
-            tvals = compute_intersections_3d_cuda(n_x, n_y, n_z, M, b, src, dst)
-
-        # tvals is shape [n_rays, n_itersection]
-        # get me a list of the shape [n_rays] with the number of finite intersections per ray
-        n_intersections = tvals.shape[1]
-        n_rays = tvals.shape[0]
-        for i in range(n_intersections):
-            current_intersection_list = tvals[:,i]
-            # if none are finite, crop tvals there and exit
-
-            if torch.all(torch.isinf(current_intersection_list)):
-                _tvals_old = tvals
-                tvals = tvals.narrow(1, 0, i)
-                del _tvals_old
-                gc.collect()
-                torch.cuda.empty_cache()
-                break
-        self.register_buffer('tvals', tvals)
+            self.register_buffer('tvals', None)
 
     def forward(self, volume):
         """
