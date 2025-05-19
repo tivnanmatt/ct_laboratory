@@ -4,6 +4,18 @@ import torch
 from .ct_projector_3d_torch import compute_intersections_3d_torch
 from .ct_projector_3d_cuda import compute_intersections_3d_cuda
 
+# For Torch-based forward/back:
+from .ct_projector_3d_torch import (
+    forward_project_3d_torch,
+    back_project_3d_torch
+)
+
+# For CUDA-based forward/back:
+from .ct_projector_3d_cuda import (
+    forward_project_3d_cuda,
+    back_project_3d_cuda
+)
+
 # Autograd function
 from .ct_projector_3d_autograd import CTProjector3DFunction
 
@@ -60,6 +72,20 @@ class CTProjector3DModule(torch.nn.Module):
             self.register_buffer('tvals', tvals)
         else:
             self.register_buffer('tvals', None)
+
+    def forward_project(self, volume):
+        if self.backend == 'torch':
+            sinogram = forward_project_3d_torch(volume, self.tvals, self.M, self.b, self.src, self.dst)
+        else:
+            sinogram = forward_project_3d_cuda(volume, self.tvals, self.M, self.b, self.src, self.dst)
+        return sinogram
+    
+    def back_project(self, sinogram):
+        if self.backend == 'torch':
+            volume = back_project_3d_torch(sinogram, self.tvals, self.M, self.b, self.src, self.dst, self.n_x, self.n_y, self.n_z)
+        else:
+            volume = back_project_3d_cuda(sinogram, self.tvals, self.M, self.b, self.src, self.dst, self.n_x, self.n_y, self.n_z)
+        return volume
 
     def forward(self, volume):
         """

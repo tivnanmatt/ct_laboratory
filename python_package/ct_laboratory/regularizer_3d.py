@@ -55,8 +55,8 @@ class TVRegularizer3D(nn.Module):
         # TV penalty = sum of absolute differences
         tv_val = diff_x.abs().mean() + diff_y.abs().mean() + diff_z.abs().mean()
 
-        tv_val = (diff_x ** 2) + (diff_y ** 2) + (diff_z ** 2)
-        tv_val = torch.sqrt(tv_val).mean()
+        # tv_val = (diff_x ** 2) + (diff_y ** 2) + (diff_z ** 2)
+        # tv_val = torch.sqrt(tv_val).mean()
 
         return tv_val
     

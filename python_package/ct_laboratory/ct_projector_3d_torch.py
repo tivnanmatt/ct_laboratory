@@ -102,6 +102,7 @@ def forward_project_3d_torch(
 
     device = volume.device
     dtype  = volume.dtype
+
     n_x, n_y, n_z = volume.shape
 
     # 1) Compute sorted intersection params

@@ -38,8 +38,6 @@ class CTProjector3DFunction(torch.autograd.Function):
         else:
             sinogram = forward_project_3d_cuda(volume, tvals, M, b, src, dst)
 
-        # sinogram = forward_project_3d_torch(volume, tvals, M, b, src, dst) 
-
         return sinogram
 
     @staticmethod
@@ -66,9 +64,6 @@ class CTProjector3DFunction(torch.autograd.Function):
             grad_volume = back_project_3d_cuda(
                 grad_output, tvals, M, b, src, dst, n_x, n_y, n_z
             )
-        # grad_volume = back_project_3d_torch(
-            # grad_output, tvals, M, b, src, dst, n_x, n_y, n_z
-        # )
 
         # Return gradient w.r.t. volume only
         return grad_volume, None, None, None, None, None, None
