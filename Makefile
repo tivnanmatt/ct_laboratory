@@ -1,7 +1,6 @@
 # Variables
 PYTHON = python
 BUILD_DIR = build
-PACKAGE_DIR = python_package
 SRC_DIR = src
 
 # Automatically detect Conda-installed GCC/G++
@@ -16,14 +15,14 @@ all: build develop
 
 build:
 	mkdir -p $(BUILD_DIR)
-	CUDA_HOME=$(CUDA_HOME) CC=$(CC) CXX=$(CXX) $(PYTHON) $(PACKAGE_DIR)/setup.py build
+	CUDA_HOME=$(CUDA_HOME) CC=$(CC) CXX=$(CXX) $(PYTHON) setup.py build
 
 develop:
-	CUDA_HOME=$(CUDA_HOME) CC=$(CC) CXX=$(CXX) $(PYTHON) $(PACKAGE_DIR)/setup.py develop
+	CUDA_HOME=$(CUDA_HOME) CC=$(CC) CXX=$(CXX) $(PYTHON) setup.py develop --user
 
 install:
-	CUDA_HOME=$(CUDA_HOME) CC=$(CC) CXX=$(CXX) $(PYTHON) $(PACKAGE_DIR)/setup.py install
+	CUDA_HOME=$(CUDA_HOME) CC=$(CC) CXX=$(CXX) $(PYTHON) setup.py install --user
 
 clean:
-	rm -rf $(BUILD_DIR) $(PACKAGE_DIR)/build $(PACKAGE_DIR)/dist $(PACKAGE_DIR)/*.egg-info
+	rm -rf $(BUILD_DIR) build dist *.egg-info
 	$(PYTHON) -m pip uninstall ct_laboratory -y || true
