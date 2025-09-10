@@ -37,6 +37,8 @@ def map_reconstruction(
         loss.backward()
         optimizer.step()
 
+        
+
         if warmup_iters is not None:
             scheduler.step()
             

@@ -1,1 +1,9 @@
 build
+__pycache__
+ct_laboratory/__pycache__/
+*.pyc
+.DS_Store
+.env
+.vscode
+.idea
+*.log
