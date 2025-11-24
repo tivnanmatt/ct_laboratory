@@ -23,7 +23,6 @@ def map_reconstruction(
             lr_lambda=lambda it: min(1.0, float(it) / warmup_iters)
         )
 
-
     t0 = time.time()
     print(f"Starting MAP reconstruction  (prior λ = {prior_weight})")
 
@@ -37,17 +36,14 @@ def map_reconstruction(
         loss.backward()
         optimizer.step()
 
-        
-
         if warmup_iters is not None:
             scheduler.step()
-            
 
         if verbose:
             if it % print_every == 0 or it == 1:
                 dt = time.time() - t0
                 print(f"Iter {it:04d}  data={ll.item():.4e}  prior={prior_weight * lp.item():.4e}  "
-                    f"loss={loss.item():.4e}   ({dt/60:.1f} min)")
+                    f"loss={loss.item():.4e}   ({dt:.2f} sec)")
                 t0 = time.time()
 
     if preconditioner is not None:

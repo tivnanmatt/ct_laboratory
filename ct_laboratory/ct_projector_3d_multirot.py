@@ -3,15 +3,18 @@ from torch import nn
 
 
 class MultiRotationProjector(nn.Module):
-    def __init__(self, projector, n_rot, shift_per_rot, shift_offset):
+    def __init__(self, base_projector, n_rot, shift_per_rot, shift_offset, verbose=True):
         super().__init__()
-        self.projector = projector
+        self.base_projector = base_projector
         self.n_rot = n_rot
         self.shift_per_rot = shift_per_rot
         self.shift_offset = shift_offset
+        self.verbose = verbose
 
     def shift_volume(self, volume: torch.Tensor, shift_z: int) -> torch.Tensor:
         # """Shift the volume along z by 'shift_z' voxels using torch.roll."""
+        # Ensure volume is contiguous before rolling
+        volume = volume.contiguous()
         return torch.roll(volume, shifts=shift_z, dims=(2,))
 
         # # pad with zeros then roll then take the center
@@ -31,8 +34,10 @@ class MultiRotationProjector(nn.Module):
         # volume = volume
         sino_list = []
         for i in range(self.n_rot):
+            if self.verbose:
+                print(f"Forward projecting rotation {i + 1}/{self.n_rot}...")
             vol_shifted = self.shift_volume(volume, i * self.shift_per_rot + self.shift_offset)
-            sino_i = self.projector(vol_shifted)
+            sino_i = self.base_projector(vol_shifted)
             sino_list.append(sino_i)
         return torch.cat(sino_list, dim=0).view(-1)
     
@@ -40,7 +45,9 @@ class MultiRotationProjector(nn.Module):
     def back_project(self, sino):
         proj_per_rot = sino.shape[0] // self.n_rot
         for i in range(self.n_rot):
-            volume_shifted = self.projector.back_project(sino[i * proj_per_rot:(i + 1) * proj_per_rot])
+            if self.verbose:
+                print(f"Back projecting rotation {i + 1}/{self.n_rot}...")
+            volume_shifted = self.base_projector.back_project(sino[i * proj_per_rot:(i + 1) * proj_per_rot])
             if i == 0:
                 volume = volume_shifted.clone()
             else:
