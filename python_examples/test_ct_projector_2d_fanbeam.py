@@ -73,7 +73,7 @@ def build_fanbeam_rays(center_xy, n_view, n_det, source_distance, detector_dista
 
 def run_fanbeam_experiment(
     n_row=256, n_col=256, n_view=360, n_det=400, ds=200.0, dd=200.0, det_spacing=1.0,
-    backend="torch", out_prefix="fanbeam", show_plot=False
+    backend="cuda", out_prefix="fanbeam", show_plot=False
 ):
     """Run a fan-beam forward & back projection demo with either the Torch or CUDA backend."""
 

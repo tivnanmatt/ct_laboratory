@@ -24,7 +24,7 @@ from ct_laboratory.ct_projector_3d_cuda import (
 )
 
 
-def test_line_integral_3d(backend="torch"):
+def test_line_integral_3d(backend="cuda"):
     """
     Compute the line integral of a single ray passing through a 3D volume.
     No visualization, only prints results.
@@ -74,5 +74,5 @@ def test_line_integral_3d(backend="torch"):
 
 
 if __name__ == "__main__":
-    test_line_integral_3d(backend="torch")
+    test_line_integral_3d(backend="cuda")
     test_line_integral_3d(backend="cuda")

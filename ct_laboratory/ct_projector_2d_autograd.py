@@ -20,7 +20,7 @@ class CTProjector2DFunction(torch.autograd.Function):
     We allow either the 'torch' or 'cuda' backend.
     """
     @staticmethod
-    def forward(ctx, image, tvals, M, b, src, dst, backend='torch'):
+    def forward(ctx, image, tvals, M, b, src, dst, backend='cuda'):
         """
         image: 2D or 3D Tensor [R,C] or [B,R,C]
         tvals: precomputed intersection params [n_ray, n_intersections]

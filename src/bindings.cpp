@@ -39,6 +39,18 @@ torch::Tensor back_project_3d_cuda(torch::Tensor,torch::Tensor,
                                    torch::Tensor,torch::Tensor,
                                    int64_t,int64_t,int64_t);
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compress_tvals_3d_cuda(
+    torch::Tensor, torch::Tensor, torch::Tensor, double);
+
+torch::Tensor forward_project_3d_compressed_cuda(
+    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
+    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);
+
+torch::Tensor back_project_3d_compressed_cuda(
+    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
+    torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
+    int64_t, int64_t, int64_t);
+
 /* ────────────────────────────── 3-D  (on-the-fly) ─────────────────────────── */
 torch::Tensor forward_project_3d_on_the_fly_cuda(torch::Tensor,
                                                  torch::Tensor,torch::Tensor,
@@ -74,6 +86,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Forward projection (3-D, pre-computed intersections, CUDA)");
     m.def("back_project_3d_cuda",     &back_project_3d_cuda,
           "Back projection (3-D, pre-computed intersections, CUDA)");
+
+    m.def("compress_tvals_3d_cuda", &compress_tvals_3d_cuda,
+          "Compress 3-D tvals to uint16 deltas (CUDA)");
+    m.def("forward_project_3d_compressed_cuda", &forward_project_3d_compressed_cuda,
+          "Forward projection (3-D, compressed uint16 intersections, CUDA)");
+    m.def("back_project_3d_compressed_cuda", &back_project_3d_compressed_cuda,
+          "Back projection (3-D, compressed uint16 intersections, CUDA)");
 
     /* -------- 3-D, Siddon on-the-fly ------------------------------------- */
     m.def("forward_project_3d_on_the_fly_cuda",

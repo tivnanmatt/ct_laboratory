@@ -22,7 +22,7 @@ output_dir = os.path.join(current_dir, "test_outputs")
 
 
 
-def test_line_integral_2d(backend="torch"):
+def test_line_integral_2d(backend="cuda"):
     """
     Compute the line integral of a single ray passing through a 2D image.
     No visualization, only prints results.
@@ -72,5 +72,5 @@ def test_line_integral_2d(backend="torch"):
 
 
 if __name__ == "__main__":
-    test_line_integral_2d(backend="torch")
+    test_line_integral_2d(backend="cuda")
     test_line_integral_2d(backend="cuda")

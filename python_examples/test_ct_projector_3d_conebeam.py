@@ -93,7 +93,7 @@ def build_conebeam_geometry_3d(
 
 def run_conebeam_experiment(
     n_x=64, n_y=64, n_z=64, n_view=90, det_nx=100, det_ny=100, ds=200.0, dd=200.0, det_spacing=1.0,
-    backend="torch", out_prefix="conebeam", show_plot=False
+    backend="cuda", out_prefix="conebeam", show_plot=False
 ):
     """Run a cone-beam forward & back projection demo with either the Torch or CUDA backend."""
 

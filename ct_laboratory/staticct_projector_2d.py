@@ -16,7 +16,7 @@ def build_static_2d_geometry(
     M_gantry: torch.Tensor,            # [n_frame, 2, 2]
     b_gantry: torch.Tensor,            # [n_frame, 2]
     active_sources: torch.Tensor,      # [n_frame, n_source] bool
-) -> (torch.Tensor, torch.Tensor):
+) -> tuple[torch.Tensor, torch.Tensor]:
     r"""
     Constructs a 2D array of (src, dst) rays from:
     1) A set of static sources/modules in **gantry coordinates**.
@@ -242,9 +242,26 @@ class UniformStaticCTProjector2D(StaticCTProjector2D):
         M_gantry: torch.Tensor,
         b_gantry: torch.Tensor,
         active_sources: torch.Tensor,
-        backend: str = "cuda"
+        backend: str = "cuda",
+        device: Optional[torch.device] = None
     ):
-        device = torch.device("cuda" if backend == "cuda" and torch.cuda.is_available() else "cpu")
+        if device is None:
+            device = torch.device("cuda" if backend == "cuda" and torch.cuda.is_available() else "cpu")
+
+        self.n_row = n_row
+        self.n_col = n_col
+        # self.M = M
+        # self.b = b
+        self.n_source = n_source
+        self.source_radius = source_radius
+        self.n_module = n_module
+        self.module_radius = module_radius
+        self.det_n_col = det_n_col
+        self.det_spacing = det_spacing
+        self.backend = backend
+        self.device = device
+
+
 
         (
             source_positions,

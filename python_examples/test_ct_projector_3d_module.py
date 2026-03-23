@@ -9,7 +9,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 output_dir = os.path.join(current_dir, "test_outputs")
 
 
-def test_ct_projector_3d_module(backend='torch'):
+def test_ct_projector_3d_module(backend='cuda'):
     """
     Build a small 3D volume, run forward/backward, and verify no errors occur.
     The 'backend' parameter selects either the 'torch' or the custom 'cuda' extension.

@@ -1,6 +1,7 @@
 import math
 import torch
 from .ct_projector_2d_module import CTProjector2DModule
+from .standard_image_transform import standard_image_transform_2d
 
 def build_fanbeam_2d_geometry(
     n_view: int,
@@ -108,8 +109,24 @@ class FanBeam2DProjector(CTProjector2DModule):
         det_spacing: float = 1.0,
         pixel_size: float = 1.0,
         angle_offset: float = 0.0,
-        backend: str = "cuda"
+        backend: str = "cuda",
+        device = None
     ):
+        
+        self.n_row = n_row
+        self.n_col = n_col
+        self.n_view = n_view
+        self.n_det = n_det
+        self.sid = sid
+        self.sdd = sdd
+        self.det_spacing = det_spacing
+        self.pixel_size = pixel_size
+        self.angle_offset = angle_offset
+        self.backend = backend
+        self.device = device
+        
+
+
         # ------------------------------------------------
         # 1) Compute src/dst using a helper function
         # ------------------------------------------------
@@ -123,53 +140,20 @@ class FanBeam2DProjector(CTProjector2DModule):
             image_center_xy=(0.0, 0.0),
         )
 
-        # ------------------------------------------------
-        # 2) Define an affine transform M, b
-        #    We'll interpret (row, col) -> (x, y) as:
-        #      x = (col - col_center) * pixel_size
-        #      y = (row - row_center) * pixel_size
-        #    or some variant. 
-        #
-        #    Usually, if row is vertical, we'd do 
-        #      y = (row_center - row)*pixel_size
-        #    but let's keep it simple:
-        # ------------------------------------------------
-        row_mid = (n_row - 1) / 2.0
-        col_mid = (n_col - 1) / 2.0
+        M, b = standard_image_transform_2d(
+            n_x=n_row,
+            n_y=n_col,
+            s_x=pixel_size,
+            s_y=pixel_size
+        )
 
-        # M is effectively the scale from (row, col) to (x, y).
-        # But be mindful about row/col <-> x,y ordering.
-        # Let's say x = (col)*pixel_size, y = (row)*pixel_size
-        # So M = [[0, pixel_size], [pixel_size, 0]] if we want row in y, col in x 
-        # but typically we can do a diagonal if row -> y is the same scale, etc.
-        # For simplicity, let's do:
-        #   x = col * pixel_size
-        #   y = row * pixel_size
-        #
-        # We'll keep an offset so the center is at (0,0).
-        # b = [col_mid, row_mid] * pixel_size
-        #
-        # Actually we only need M in row-col space => (x,y). For orthonormal scaling:
-        M = torch.tensor([
-            [pixel_size, 0.0],
-            [0.0, pixel_size]
-        ], dtype=torch.float32)
-
-        b = torch.tensor([-col_mid * pixel_size, -row_mid * pixel_size], dtype=torch.float32)
-
-        # But note we used (col, row) ordering in `b`. 
-        # The usage is up to you as long as the intersection code 
-        # is consistent. 
-        #
-        # You can adjust signs as needed if you want the y-axis 
-        # to go upward. For example, 
-        # b = [col_mid, row_mid] * pixel_size, 
-        # and if you want row to go downward, you'd do a negative factor in M[1,1].
-        # We'll keep it simple here.
-
+        # b = b*0
         # Move everything to the same device so we don't get a mismatch
         # in the parent's constructor.
-        device = torch.device("cuda" if backend == "cuda" and torch.cuda.is_available() else "cpu")
+
+        if device is None:
+            device = torch.device("cuda" if backend == "cuda" and torch.cuda.is_available() else "cpu")
+        
         src = src.to(device)
         dst = dst.to(device)
         M = M.to(device)

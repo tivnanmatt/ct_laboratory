@@ -61,10 +61,13 @@ def main():
 
     # Build ground truth phantom (no grad tracking)
     phantom_gt = build_circular_phantom(n_row, n_col, center_offset=(-20, 10), radius=50.0)
+
+    
     # Coordinate transform: (row,col) -> (x,y)
     A = torch.eye(2, dtype=torch.float32)
     row_mid, col_mid = (n_row - 1) / 2.0, (n_col - 1) / 2.0
     b = torch.tensor([-row_mid, -col_mid], dtype=torch.float32)
+
     src, dst = build_fanbeam_rays(center_xy=(0, 0), n_view=n_view, n_det=n_det,
                                   source_distance=ds, detector_distance=dd, det_spacing=det_spacing)
 
@@ -77,7 +80,7 @@ def main():
     dst = dst.to(device)
 
     # Use the "torch" backend for this example (custom "cuda" extension could be used by setting backend='cuda')
-    backend = 'torch'
+    backend = 'cuda'
     backend = 'cuda'
 
     # Build the projector module (which precomputes intersections)

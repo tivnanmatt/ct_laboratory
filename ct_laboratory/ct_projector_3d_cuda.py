@@ -26,8 +26,11 @@ import ct_laboratory._C as _C  # C++/CUDA extension
 
 __all__ = [
     "compute_intersections_3d_cuda",
+    "compress_tvals_3d_cuda",
     "forward_project_3d_cuda",
+    "forward_project_3d_compressed_cuda",
     "back_project_3d_cuda",
+    "back_project_3d_compressed_cuda",
     "forward_project_3d_on_the_fly_cuda",
     "back_project_3d_on_the_fly_cuda",
 ]
@@ -43,8 +46,12 @@ def _prepare_M_inv(M: torch.Tensor) -> torch.Tensor:
     return torch.inverse(M).to(dtype=torch.float32, copy=False).contiguous()
 
 
-def _empty_or_none(t: torch.Tensor | None) -> bool:  # utility for flexible API
-    return (t is None) or (t.numel() == 0)
+def _empty_or_none(t: torch.Tensor | tuple | list | None) -> bool:  # utility for flexible API
+    if t is None:
+        return True
+    if isinstance(t, (tuple, list)):
+        return len(t) == 0
+    return t.numel() == 0
 
 # -----------------------------------------------------------------------------
 # 1. Pre‑computed intersection utilities
@@ -67,26 +74,46 @@ def compute_intersections_3d_cuda(
     M_inv = _prepare_M_inv(M)
     return _C.compute_intersections_3d(n_x, n_y, n_z, src, dst, M_inv, b)
 
+def compress_tvals_3d_cuda(
+    tvals: torch.Tensor,
+    M: torch.Tensor,
+    src: torch.Tensor,
+    dst: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compress float tvals to uint16 deltas on GPU."""
+    # 4 diagonals of the parallelepiped voxel
+    # [1,1,1], [1,1,-1], [1,-1,1], [-1,1,1]
+    diags = torch.tensor([
+        [1, 1, 1],
+        [1, 1, -1],
+        [1, -1, 1],
+        [-1, 1, 1]
+    ], device=M.device, dtype=M.dtype).t()  # [3, 4]
+    voxel_diags = M @ diags  # [3, 4]
+    voxel_diag_len = torch.norm(voxel_diags, dim=0).max().item()
+    
+    return _C.compress_tvals_3d_cuda(tvals, src, dst, voxel_diag_len)
+
 # ----------------------------------------------------
 # Forward projector (pre‑computed or Siddon fallback)
 # ----------------------------------------------------
 
 def forward_project_3d_cuda(
     volume: torch.Tensor,
-    tvals: torch.Tensor | None,
-    M: torch.Tensor,
-    b: torch.Tensor,
+    tvals: torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None,
     src: torch.Tensor,
     dst: torch.Tensor,
+    M: torch.Tensor,
+    b: torch.Tensor,
 ) -> torch.Tensor:
     """Line‐integral forward projector.
 
     Parameters
     ----------
     volume : ``[B, X, Y, Z]`` or ``[X, Y, Z]``
-    tvals  : pre‑computed intersections **or** *None* / empty to use Siddon
-    M, b   : affine that maps (i,j,k) → (x,y,z)
+    tvals  : float tensor or (t_uint16, t_start, t_scale) tuple or *None*/empty to use Siddon
     src,dst: ``[n_ray, 3]`` world‑space coordinates
+    M, b   : affine that maps (i,j,k) → (x,y,z)
     """
 
     assert volume.is_contiguous(), "Volume must be C-contiguous"
@@ -100,20 +127,42 @@ def forward_project_3d_cuda(
     assert b.is_contiguous(), "b must be C-contiguous"
     assert b.dtype == torch.float32, "b must be float32"
 
-    if not _empty_or_none(tvals):
-        assert tvals.is_contiguous(), "tvals must be C-contiguous"
+    if _empty_or_none(tvals):
+        return forward_project_3d_on_the_fly_cuda(volume, M, b, src, dst)
+
+    M_inv = _prepare_M_inv(M)
+
+    if isinstance(tvals, (tuple, list)):
+        t_uint16, t_start, t_scale = tvals
+        out = _C.forward_project_3d_compressed_cuda(
+            volume, t_uint16, t_start, t_scale, src, dst, M_inv, b
+        )
+    else:
         assert tvals.dtype == torch.float32, "tvals must be float32"
-
-        M_inv = _prepare_M_inv(M)
-
         out = _C.forward_project_3d_cuda(volume, tvals, src, dst, M_inv, b)
 
-        if volume.dim() == 3:
-            out = out.squeeze(0)
-        return out
+    if volume.dim() == 3:
+        out = out.squeeze(0)
+    return out
 
-    else:
-        return forward_project_3d_on_the_fly_cuda(volume, M, b, src, dst)
+def forward_project_3d_compressed_cuda(
+    volume: torch.Tensor,
+    t_uint16: torch.Tensor,
+    t_start: torch.Tensor,
+    t_scale: torch.Tensor,
+    M: torch.Tensor,
+    b: torch.Tensor,
+    src: torch.Tensor,
+    dst: torch.Tensor,
+) -> torch.Tensor:
+    """Forward projection using compressed tvals."""
+    M_inv = _prepare_M_inv(M)
+    out = _C.forward_project_3d_compressed_cuda(
+        volume, t_uint16, t_start, t_scale, src, dst, M_inv, b
+    )
+    if volume.dim() == 3:
+        out = out.squeeze(0)
+    return out
 
     
 
@@ -123,7 +172,49 @@ def forward_project_3d_cuda(
 
 def back_project_3d_cuda(
     sinogram: torch.Tensor,
-    tvals: torch.Tensor | None,
+    tvals: torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None,
+    src: torch.Tensor,
+    dst: torch.Tensor,
+    M: torch.Tensor,
+    b: torch.Tensor,
+    n_x: int,
+    n_y: int,
+    n_z: int,
+) -> torch.Tensor:
+    """Adjoint back-projector.
+
+    Parameters
+    ----------
+    sinogram : ``[B, n_ray]`` or ``[n_ray]``
+    tvals    : float tensor or (t_uint16, t_start, t_scale) tuple or *None*/empty to use Siddon
+    """
+    assert sinogram.is_contiguous(), "sinogram must be C-contiguous"
+    assert sinogram.dtype == torch.float32, "sinogram must be float32"
+
+    if _empty_or_none(tvals):
+        return back_project_3d_on_the_fly_cuda(sinogram, src, dst, _prepare_M_inv(M), b, n_x, n_y, n_z)
+
+    M_inv = _prepare_M_inv(M)
+
+    if isinstance(tvals, (tuple, list)):
+        t_uint16, t_start, t_scale = tvals
+        out = _C.back_project_3d_compressed_cuda(
+            sinogram, t_uint16, t_start, t_scale, src, dst, M_inv, b, n_x, n_y, n_z
+        )
+    else:
+        assert tvals.dtype == torch.float32, "tvals must be float32"
+        out = _C.back_project_3d_cuda(sinogram, tvals, src, dst, M_inv, b, n_x, n_y, n_z)
+
+    if sinogram.dim() == 1:
+        out = out.squeeze(0)
+    return out
+
+
+def back_project_3d_compressed_cuda(
+    sinogram: torch.Tensor,
+    t_uint16: torch.Tensor,
+    t_start: torch.Tensor,
+    t_scale: torch.Tensor,
     M: torch.Tensor,
     b: torch.Tensor,
     src: torch.Tensor,
@@ -132,38 +223,11 @@ def back_project_3d_cuda(
     n_y: int,
     n_z: int,
 ) -> torch.Tensor:
-    
-    # --- NEW: enforce dtype + contiguity on all inputs ---
-    # 1) Volume must be [B,X,Y,Z] or [X,Y,Z], float32, C-order
-    # if not volume.is_contiguous() or volume.dtype != torch.float32:
-        # volume = volume.contiguous().to(dtype=torch.float32)
-    assert sinogram.is_contiguous(), "Volume must be C-contiguous"
-    assert sinogram.dtype == torch.float32, "Volume must be float32"
-
-    # 2) tvals must be float32 & contiguous (if used)
-    if not _empty_or_none(tvals):
-        # if tvals.dtype != torch.float32 or not tvals.is_contiguous():
-        #     tvals = tvals.contiguous().to(dtype=torch.float32)
-        assert tvals.is_contiguous(), "tvals must be C-contiguous"
-        assert tvals.dtype == torch.float32, "tvals must be float32"
-
-    # 3) src/dst must be [n_ray,3], float32, contiguous
-    # if src.dtype != torch.float32 or not src.is_contiguous():
-    #     src = src.contiguous().to(dtype=torch.float32)
-    assert src.is_contiguous(), "src must be C-contiguous"
-    assert src.dtype == torch.float32, "src must be float32"
-
-    # if dst.dtype != torch.float32 or not dst.is_contiguous():
-    #     dst = dst.contiguous().to(dtype=torch.float32)
-    assert dst.is_contiguous(), "dst must be C-contiguous"
-    assert dst.dtype == torch.float32, "dst must be float32"
-
-    """Adjoint of the forward projector with optional Siddon fallback."""
-    if _empty_or_none(tvals):
-        return back_project_3d_on_the_fly_cuda(sinogram, M, b, src, dst, n_x, n_y, n_z)
-
+    """Back-projection using compressed tvals."""
     M_inv = _prepare_M_inv(M)
-    out = _C.back_project_3d_cuda(sinogram, tvals, src, dst, M_inv, b, n_x, n_y, n_z)
+    out = _C.back_project_3d_compressed_cuda(
+        sinogram, t_uint16, t_start, t_scale, src, dst, M_inv, b, n_x, n_y, n_z
+    )
     if sinogram.dim() == 1:
         out = out.squeeze(0)
     return out

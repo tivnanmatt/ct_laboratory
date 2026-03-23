@@ -57,7 +57,7 @@ __global__ void compute_intersections_3d_kernel(
 
     float dirx = di-si, diry = dj-sj, dirz = dk-sk;
     int n_int = (n_x+1)+(n_y+1)+(n_z+1);
-    float* t_vals = &t_out[ray_id*n_int];
+    float* t_vals = &t_out[(size_t)ray_id*n_int];
 
     int cnt = 0;
     // x-planes
@@ -95,6 +95,179 @@ __global__ void compute_intersections_3d_kernel(
             }
 }
 
+// ……………………… forward_project_3d_compressed_kernel ………………………
+__global__ void forward_project_3d_compressed_kernel(
+    const float* volume, int batch, int n_x, int n_y, int n_z,
+    const uint16_t* t_uint16, const float* t_start, const float* t_scale, int n_int,
+    const float* src_xyz, const float* dst_xyz, int n_ray,
+    const float* M_inv, const float* b,
+    float* out)
+{
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * n_ray;
+    if (gid >= total) return;
+
+    int b_idx = gid / n_ray;
+    int r_idx = gid % n_ray;
+
+    float sx = src_xyz[3*r_idx+0], sy = src_xyz[3*r_idx+1], sz = src_xyz[3*r_idx+2];
+    float dx = dst_xyz[3*r_idx+0], dy = dst_xyz[3*r_idx+1], dz = dst_xyz[3*r_idx+2];
+    float vx = dx - sx, vy = dy - sy, vz = dz - sz;
+
+    const uint16_t* r_uint16 = &t_uint16[(size_t)r_idx * n_int];
+    float start_val = t_start[r_idx];
+    float scale_val = t_scale[r_idx];
+    float accum = 0.f;
+
+    // We preserve the marching behavior: t_cur is reconstructed incrementally
+    float t_prev = start_val; 
+    unsigned int k_sum = 0;
+
+    for (int i = 0; i < n_int - 1; ++i) {
+        // The first byte r_uint16[0] is always 0, so t_prev starts at start_val correctly.
+        k_sum += (unsigned int)r_uint16[i+1];
+        float t1 = start_val + (float)k_sum * scale_val;
+        
+        float t0 = t_prev;
+        t_prev = t1; // for next iteration
+        
+        float x0 = sx + t0 * vx, y0 = sy + t0 * vy, z0 = sz + t0 * vz;
+        float x1 = sx + t1 * vx, y1 = sy + t1 * vy, z1 = sz + t1 * vz;
+        float seg_len = sqrtf((x1-x0)*(x1-x0) + (y1-y0)*(y1-y0) + (z1-z0)*(z1-z0));
+        if (seg_len < 1e-9f) continue;
+
+        float mx = 0.5f * (x0 + x1), my = 0.5f * (y0 + y1), mz = 0.5f * (z0 + z1);
+        float i_f, j_f, k_f;
+        apply_affine_inverse_3d(mx, my, mz, M_inv, b, i_f, j_f, k_f);
+
+        int i_i = __float2int_rn(i_f);
+        int j_i = __float2int_rn(j_f);
+        int k_i = __float2int_rn(k_f);
+
+        if (i_i < 0 || i_i >= n_x || j_i < 0 || j_i >= n_y || k_i < 0 || k_i >= n_z) continue;
+
+        size_t idx = (size_t)b_idx * n_x * n_y * n_z
+                   + (size_t)i_i * n_y * n_z
+                   + (size_t)j_i * n_z
+                   + (size_t)k_i;
+
+        accum += volume[idx] * seg_len;
+    }
+    out[b_idx * n_ray + r_idx] = accum;
+}
+
+// ……………………… compress_tvals_3d_kernel ………………………
+__global__ void compress_tvals_3d_kernel(
+    const float* tvals, int n_ray, int n_int,
+    const float* src_xyz, const float* dst_xyz,
+    float voxel_diag_len,
+    uint16_t* t_uint16, float* t_start, float* t_scale)
+{
+    int r_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r_idx >= n_ray) return;
+
+    // 1. Scale factor for this ray
+    float sx = src_xyz[3*r_idx+0], sy = src_xyz[3*r_idx+1], sz = src_xyz[3*r_idx+2];
+    float dx = dst_xyz[3*r_idx+0], dy = dst_xyz[3*r_idx+1], dz = dst_xyz[3*r_idx+2];
+    float ray_len = sqrtf((dx-sx)*(dx-sx) + (dy-sy)*(dy-sy) + (dz-sz)*(dz-sz));
+    ray_len = fmaxf(ray_len, 1e-6f);
+
+    // Use TARGET_VAL = 10000 like in Python for uint16
+    float target_val = 10000.0f;
+    float scale = (voxel_diag_len / target_val) / ray_len;
+    t_scale[r_idx] = scale;
+
+    const float* r_tvals = &tvals[(size_t)r_idx * n_int];
+    uint16_t* r_uint16 = &t_uint16[(size_t)r_idx * n_int];
+
+    float start = r_tvals[0];
+    t_start[r_idx] = start;
+
+    r_uint16[0] = 0; // first element is always 0 relative to start
+    float inv_scale = 1.0f / scale;
+
+    unsigned int k_sum_prev = 0;
+
+    for (int i = 1; i < n_int; ++i) {
+        float t_val = r_tvals[i];
+        if (isinf(t_val)) {
+            r_uint16[i] = 0;
+            continue;
+        }
+
+        // Ideally: t_approx[i] = start + k_sum_curr * scale
+        // We want k_sum_curr = round((t_val - start) / scale)
+        unsigned int k_sum_curr = (unsigned int)roundf((t_val - start) * inv_scale);
+        
+        // delta = k_sum_curr - k_sum_prev
+        int diff = (int)k_sum_curr - (int)k_sum_prev;
+        if (diff < 0) diff = 0;
+        if (diff > 32000) diff = 32000; // Keep it safe for int16 compatibility
+
+        r_uint16[i] = (uint16_t)diff;
+        
+        // Update k_sum_prev to match what the decompressor will see
+        k_sum_prev += (unsigned int)r_uint16[i];
+    }
+}
+
+// ……………………… back_project_3d_compressed_kernel ………………………
+__global__ void back_project_3d_compressed_kernel(
+    float* out_vol, int batch, int n_x, int n_y, int n_z,
+    const uint16_t* t_uint16, const float* t_start, const float* t_scale, int n_int,
+    const float* sino, int n_ray,
+    const float* src_xyz, const float* dst_xyz,
+    const float* M_inv, const float* b)
+{
+    int gid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch * n_ray;
+    if (gid >= total) return;
+
+    int b_idx = gid / n_ray;
+    int r_idx = gid % n_ray;
+
+    float sx = src_xyz[3*r_idx+0], sy = src_xyz[3*r_idx+1], sz = src_xyz[3*r_idx+2];
+    float dx = dst_xyz[3*r_idx+0], dy = dst_xyz[3*r_idx+1], dz = dst_xyz[3*r_idx+2];
+    float vx = dx - sx, vy = dy - sy, vz = dz - sz;
+
+    const uint16_t* r_uint16 = &t_uint16[(size_t)r_idx * n_int];
+    float start_val = t_start[r_idx];
+    float scale_val = t_scale[r_idx];
+    float s_val = sino[b_idx * n_ray + r_idx];
+
+    float t_prev = start_val;
+    unsigned int k_sum = 0;
+
+    for (int i = 0; i < n_int - 1; ++i) {
+        k_sum += (unsigned int)r_uint16[i+1];
+        float t1 = start_val + (float)k_sum * scale_val;
+        float t0 = t_prev;
+        t_prev = t1;
+
+        float x0 = sx + t0 * vx, y0 = sy + t0 * vy, z0 = sz + t0 * vz;
+        float x1 = sx + t1 * vx, y1 = sy + t1 * vy, z1 = sz + t1 * vz;
+        float seg_len = sqrtf((x1-x0)*(x1-x0) + (y1-y0)*(y1-y0) + (z1-z0)*(z1-z0));
+        if (seg_len < 1e-9f) continue;
+
+        float mx = 0.5f * (x0 + x1), my = 0.5f * (y0 + y1), mz = 0.5f * (z0 + z1);
+        float i_f, j_f, k_f;
+        apply_affine_inverse_3d(mx, my, mz, M_inv, b, i_f, j_f, k_f);
+
+        int i_i = __float2int_rn(i_f);
+        int j_i = __float2int_rn(j_f);
+        int k_i = __float2int_rn(k_f);
+
+        if (i_i < 0 || i_i >= n_x || j_i < 0 || j_i >= n_y || k_i < 0 || k_i >= n_z) continue;
+
+        float contrib = s_val * seg_len;
+        size_t idx = (size_t)b_idx * n_x * n_y * n_z
+                   + (size_t)i_i * n_y * n_z
+                   + (size_t)j_i * n_z
+                   + (size_t)k_i;
+        atomicAdd(&out_vol[idx], contrib);
+    }
+}
+
 // ……………………… forward_project_3d_kernel ………………………
 __global__ void forward_project_3d_kernel(
     const float* volume,int batch,int n_x,int n_y,int n_z,
@@ -114,7 +287,7 @@ __global__ void forward_project_3d_kernel(
     float dx = dst_xyz[3*r_idx+0], dy = dst_xyz[3*r_idx+1], dz = dst_xyz[3*r_idx+2];
     float vx=dx-sx, vy=dy-sy, vz=dz-sz;
 
-    const float* t_vals = &t_sorted[r_idx*n_int];
+    const float* t_vals = &t_sorted[(size_t)r_idx*n_int];
     float accum = 0.f;
 
     for (int i=0;i<n_int-1;++i){
@@ -168,7 +341,7 @@ __global__ void back_project_3d_kernel(
     float dx=dst_xyz[3*r_idx+0], dy=dst_xyz[3*r_idx+1], dz=dst_xyz[3*r_idx+2];
     float vx=dx-sx, vy=dy-sy, vz=dz-sz;
 
-    const float* t_vals = &t_sorted[r_idx*n_int];
+    const float* t_vals = &t_sorted[(size_t)r_idx*n_int];
     float s_val = sino[b_idx*n_ray + r_idx];
 
     for (int i=0;i<n_int-1;++i){
@@ -228,55 +401,154 @@ torch::Tensor compute_intersections_3d(
 }
 
 torch::Tensor forward_project_3d_cuda(
-    torch::Tensor volume,torch::Tensor tvals,
-    torch::Tensor src,torch::Tensor dst,
-    torch::Tensor M_inv,torch::Tensor b)
+    torch::Tensor volume, torch::Tensor tvals,
+    torch::Tensor src, torch::Tensor dst,
+    torch::Tensor M_inv, torch::Tensor b)
 {
-    TORCH_CHECK(volume.is_cuda() && tvals.is_cuda(),"volume/tvals must be CUDA");
+    TORCH_CHECK(volume.is_cuda() && tvals.is_cuda(), "volume/tvals must be CUDA");
+    TORCH_CHECK(src.is_cuda() && dst.is_cuda(), "src/dst must be CUDA");
+    TORCH_CHECK(M_inv.is_cuda() && b.is_cuda(), "M_inv,b must be CUDA");
 
-    int64_t batch=1,n_x,n_y,n_z;
-    if (volume.dim()==3){n_x=volume.size(0);n_y=volume.size(1);n_z=volume.size(2);}
-    else if (volume.dim()==4){
-        batch=volume.size(0);n_x=volume.size(1);n_y=volume.size(2);n_z=volume.size(3);}
-    else TORCH_CHECK(false,"volume shape!");
+    int64_t batch = 1, n_x, n_y, n_z;
+    if (volume.dim() == 3) { n_x = volume.size(0); n_y = volume.size(1); n_z = volume.size(2); }
+    else if (volume.dim() == 4) {
+        batch = volume.size(0); n_x = volume.size(1); n_y = volume.size(2); n_z = volume.size(3);
+    }
+    else TORCH_CHECK(false, "volume shape!");
 
     int64_t n_ray = src.size(0);
     int64_t n_int = tvals.size(1);
-    auto out = torch::zeros({batch,n_ray}, volume.options());
+    auto out = torch::zeros({ batch, n_ray }, volume.options());
 
-    int threads=THREADS, blocks=(int)((batch*n_ray+threads-1)/threads);
-    forward_project_3d_kernel<<<blocks,threads>>>(
-        volume.data_ptr<float>(),(int)batch,(int)n_x,(int)n_y,(int)n_z,
-        tvals.data_ptr<float>(),(int)n_int,
-        src.data_ptr<float>(),dst.data_ptr<float>(),(int)n_ray,
-        M_inv.data_ptr<float>(),b.data_ptr<float>(),
+    int threads = THREADS, blocks = (int)((batch * n_ray + threads - 1) / threads);
+
+    forward_project_3d_kernel<<<blocks, threads>>>(
+        volume.data_ptr<float>(), (int)batch, (int)n_x, (int)n_y, (int)n_z,
+        tvals.data_ptr<float>(), (int)n_int,
+        src.data_ptr<float>(), dst.data_ptr<float>(), (int)n_ray,
+        M_inv.data_ptr<float>(), b.data_ptr<float>(),
         out.data_ptr<float>());
+    
     return out;
 }
 
 torch::Tensor back_project_3d_cuda(
-    torch::Tensor sino,torch::Tensor tvals,
-    torch::Tensor src,torch::Tensor dst,
-    torch::Tensor M_inv,torch::Tensor b,
-    int64_t n_x,int64_t n_y,int64_t n_z)
+    torch::Tensor sino, torch::Tensor tvals,
+    torch::Tensor src, torch::Tensor dst,
+    torch::Tensor M_inv, torch::Tensor b,
+    int64_t n_x, int64_t n_y, int64_t n_z)
 {
-    TORCH_CHECK(sino.is_cuda() && tvals.is_cuda(),"sino/tvals must be CUDA");
+    TORCH_CHECK(sino.is_cuda() && tvals.is_cuda(), "sino/tvals must be CUDA");
+    TORCH_CHECK(src.is_cuda() && dst.is_cuda(), "src/dst must be CUDA");
+    TORCH_CHECK(M_inv.is_cuda() && b.is_cuda(), "M_inv,b must be CUDA");
 
-    int64_t batch=1,n_ray;
-    if (sino.dim()==1){n_ray=sino.size(0);}
-    else if (sino.dim()==2){batch=sino.size(0);n_ray=sino.size(1);}
-    else TORCH_CHECK(false,"sino shape!");
+    int64_t batch = 1, n_ray;
+    if (sino.dim() == 1) { n_ray = sino.size(0); }
+    else if (sino.dim() == 2) { batch = sino.size(0); n_ray = sino.size(1); }
+    else TORCH_CHECK(false, "sino shape!");
 
     int64_t n_int = tvals.size(1);
-    auto out     = torch::zeros({batch,n_x,n_y,n_z}, sino.options());
+    auto out = torch::zeros({ batch, n_x, n_y, n_z }, sino.options());
+    int threads = THREADS, blocks = (int)((batch * n_ray + threads - 1) / threads);
 
-    int threads=THREADS, blocks=(int)((batch*n_ray+threads-1)/threads);
-    back_project_3d_kernel<<<blocks,threads>>>(
-        out.data_ptr<float>(),(int)batch,(int)n_x,(int)n_y,(int)n_z,
-        tvals.data_ptr<float>(),(int)n_int,
-        sino.data_ptr<float>(),(int)n_ray,
-        src.data_ptr<float>(),dst.data_ptr<float>(),
-        M_inv.data_ptr<float>(),b.data_ptr<float>());
+    back_project_3d_kernel<<<blocks, threads>>>(
+        out.data_ptr<float>(), (int)batch, (int)n_x, (int)n_y, (int)n_z,
+        tvals.data_ptr<float>(), (int)n_int,
+        sino.data_ptr<float>(), (int)n_ray,
+        src.data_ptr<float>(), dst.data_ptr<float>(),
+        M_inv.data_ptr<float>(), b.data_ptr<float>());
+
+    return out;
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> compress_tvals_3d_cuda(
+    torch::Tensor tvals,
+    torch::Tensor src, torch::Tensor dst,
+    double voxel_diag_len)
+{
+    TORCH_CHECK(tvals.is_cuda() && src.is_cuda() && dst.is_cuda(), "Inputs must be CUDA");
+    int64_t n_ray = tvals.size(0);
+    int64_t n_int = tvals.size(1);
+
+    auto t_uint16 = torch::empty({n_ray, n_int}, tvals.options().dtype(torch::kInt16));
+    auto t_start = torch::empty({n_ray}, tvals.options().dtype(torch::kFloat32));
+    auto t_scale = torch::empty({n_ray}, tvals.options().dtype(torch::kFloat32));
+
+    int threads = THREADS;
+    int blocks = (int)((n_ray + threads - 1) / threads);
+
+    compress_tvals_3d_kernel<<<blocks, threads>>>(
+        tvals.data_ptr<float>(), (int)n_ray, (int)n_int,
+        src.data_ptr<float>(), dst.data_ptr<float>(),
+        (float)voxel_diag_len,
+        (uint16_t*)t_uint16.data_ptr<int16_t>(),
+        t_start.data_ptr<float>(),
+        t_scale.data_ptr<float>());
+
+    return std::make_tuple(t_uint16, t_start, t_scale);
+}
+
+torch::Tensor forward_project_3d_compressed_cuda(
+    torch::Tensor volume,
+    torch::Tensor t_uint16, torch::Tensor t_start, torch::Tensor t_scale,
+    torch::Tensor src, torch::Tensor dst,
+    torch::Tensor M_inv, torch::Tensor b)
+{
+    TORCH_CHECK(volume.is_cuda() && t_uint16.is_cuda() && t_start.is_cuda() && t_scale.is_cuda(), "Inputs must be CUDA");
+    
+    int64_t batch=1, n_x, n_y, n_z;
+    if (volume.dim() == 3) {
+        n_x = volume.size(0); n_y = volume.size(1); n_z = volume.size(2);
+    } else if (volume.dim() == 4) {
+        batch = volume.size(0); n_x = volume.size(1); n_y = volume.size(2); n_z = volume.size(3);
+    } else TORCH_CHECK(false, "volume shape!");
+
+    int64_t n_ray = src.size(0);
+    int64_t n_int = t_uint16.size(1);
+    auto out = torch::zeros({batch, n_ray}, volume.options());
+
+    int threads = THREADS;
+    int blocks = (int)((batch * n_ray + threads - 1) / threads);
+    forward_project_3d_compressed_kernel<<<blocks, threads>>>(
+        volume.data_ptr<float>(), (int)batch, (int)n_x, (int)n_y, (int)n_z,
+        (const uint16_t*)t_uint16.data_ptr<int16_t>(),
+        t_start.data_ptr<float>(),
+        t_scale.data_ptr<float>(),
+        (int)n_int,
+        src.data_ptr<float>(), dst.data_ptr<float>(), (int)n_ray,
+        M_inv.data_ptr<float>(), b.data_ptr<float>(),
+        out.data_ptr<float>());
+    return out;
+}
+
+torch::Tensor back_project_3d_compressed_cuda(
+    torch::Tensor sino,
+    torch::Tensor t_uint16, torch::Tensor t_start, torch::Tensor t_scale,
+    torch::Tensor src, torch::Tensor dst,
+    torch::Tensor M_inv, torch::Tensor b,
+    int64_t n_x, int64_t n_y, int64_t n_z)
+{
+    TORCH_CHECK(sino.is_cuda() && t_uint16.is_cuda() && t_start.is_cuda() && t_scale.is_cuda(), "Inputs must be CUDA");
+
+    int64_t batch = 1, n_ray;
+    if (sino.dim() == 1) { n_ray = sino.size(0); }
+    else if (sino.dim() == 2) { batch = sino.size(0); n_ray = sino.size(1); }
+    else TORCH_CHECK(false, "sino shape!");
+
+    int64_t n_int = t_uint16.size(1);
+    auto out = torch::zeros({batch, n_x, n_y, n_z}, sino.options());
+
+    int threads = THREADS;
+    int blocks = (int)((batch * n_ray + threads - 1) / threads);
+    back_project_3d_compressed_kernel<<<blocks, threads>>>(
+        out.data_ptr<float>(), (int)batch, (int)n_x, (int)n_y, (int)n_z,
+        (const uint16_t*)t_uint16.data_ptr<int16_t>(),
+        t_start.data_ptr<float>(),
+        t_scale.data_ptr<float>(),
+        (int)n_int,
+        sino.data_ptr<float>(), (int)n_ray,
+        src.data_ptr<float>(), dst.data_ptr<float>(),
+        M_inv.data_ptr<float>(), b.data_ptr<float>());
     return out;
 }
 

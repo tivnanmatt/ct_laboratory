@@ -32,29 +32,33 @@ def build_circular_sequence(
 def build_helical_sequence(
         n_frame: int,
         n_source: int,
-        pitch: float,
+        helical_travel_per_rot: float,
         device: Optional[torch.device] = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Use CPU for geometry construction to avoid GPU overhead/spikes
+    cpu = torch.device('cpu')
 
-
-    translation_per_frame = pitch / n_source
-    translation_z_offset = n_frame * translation_per_frame / 2
+    translation_per_frame = helical_travel_per_rot / n_source
 
     M_list = []
     b_list = []
-    active_sources = torch.zeros(n_frame, n_source, dtype=torch.bool, device=device)
+    active_sources = torch.zeros(n_frame, n_source, dtype=torch.bool, device=cpu)
     for i in range(n_frame):
-        M_ = torch.eye(3, dtype=torch.float32, device=device)   # 3x3 identity (no rotation)
-        b_ = torch.zeros(3, dtype=torch.float32, device=device)   # zero offset
-        b_[2] = i * translation_per_frame - translation_z_offset # z-offset
+        M_ = torch.eye(3, dtype=torch.float32, device=cpu)
+        b_ = torch.zeros(3, dtype=torch.float32, device=cpu)
+        b_[2] = (i - (n_frame - 1) / 2.0) * translation_per_frame
         M_list.append(M_)
         b_list.append(b_)
-        active_sources[i, i % n_source] = True  # frame i activates source i
-    M_gantry = torch.stack(M_list, dim=0)  # shape: [n_frame, 3, 3]
+        active_sources[i, i % n_source] = True
+        
+    M_gantry = torch.stack(M_list, dim=0)
     b_gantry = torch.stack(b_list, dim=0)
+
+    if device is not None:
+        M_gantry = M_gantry.to(device)
+        b_gantry = b_gantry.to(device)
+        active_sources = active_sources.to(device)
 
     return M_gantry, b_gantry, active_sources
 
@@ -109,31 +113,40 @@ def build_static_3d_geometry(
             offset_v = (iv - mid_v) * det_spacing_y
             # local (u, v, 0)
             pixel_positions_local.append([offset_u, offset_v, 0.0])
-    pixel_positions_local = torch.tensor(pixel_positions_local, dtype=torch.float32, device=device)
+    # Build geometry on CPU to avoid thousands of small GPU allocations
+    pixel_positions_local = torch.tensor(pixel_positions_local, dtype=torch.float32, device='cpu')
+    
+    M_gantry_cpu = M_gantry.cpu()
+    b_gantry_cpu = b_gantry.cpu()
+    active_sources_cpu = active_sources.cpu()
+    source_positions_cpu = source_positions.cpu()
+    module_centers_cpu = module_centers.cpu()
+    module_orientations_cpu = module_orientations.cpu()
+    source_module_mask_cpu = source_module_mask.cpu()
 
     all_src = []
     all_dst = []
 
     for i_frame in range(n_frame):
-        Mf = M_gantry[i_frame]  # [3,3]
-        bf = b_gantry[i_frame]  # [3]
+        Mf = M_gantry_cpu[i_frame]  # [3,3]
+        bf = b_gantry_cpu[i_frame]  # [3]
 
-        active_src_mask = active_sources[i_frame]  # shape [n_source], bool
+        active_src_mask = active_sources_cpu[i_frame]  # shape [n_source], bool
 
         for s_idx in range(n_source):
             if not bool(active_src_mask[s_idx]):
                 continue
 
-            src_gantry = source_positions[s_idx]  # [3]
+            src_gantry = source_positions_cpu[s_idx]  # [3]
             # source in final coords
             src_image = Mf @ src_gantry + bf
 
             for m_idx in range(n_module):
-                if not bool(source_module_mask[s_idx, m_idx]):
+                if not bool(source_module_mask_cpu[s_idx, m_idx]):
                     continue
 
-                center_gantry = module_centers[m_idx]       # [3]
-                Rm = module_orientations[m_idx]             # [3,3]
+                center_gantry = module_centers_cpu[m_idx]       # [3]
+                Rm = module_orientations_cpu[m_idx]             # [3,3]
 
                 # local -> gantry => Rm*(u,v,0) + center
                 pixels_gantry = pixel_positions_local @ Rm.transpose(0, 1)
@@ -153,8 +166,8 @@ def build_static_3d_geometry(
         dst_out = torch.empty((0, 3), dtype=torch.float32, device=device)
         return src_out, dst_out
 
-    src_out = torch.cat(all_src, dim=0)
-    dst_out = torch.cat(all_dst, dim=0)
+    src_out = torch.cat(all_src, dim=0).to(device)
+    dst_out = torch.cat(all_dst, dim=0).to(device)
     return src_out, dst_out
 
 
@@ -192,7 +205,9 @@ class StaticCTProjector3D(CTProjector3DModule):
         b: torch.Tensor,                      # [3]
         backend: str = "cuda",
         device: Optional[torch.device] = None,
-        precomputed_intersections: bool = False
+        precomputed_intersections: bool = False,
+        tvals: Optional[torch.Tensor] = None,
+        use_compression: bool = True
     ):
         
         if device is None:
@@ -230,9 +245,30 @@ class StaticCTProjector3D(CTProjector3DModule):
             dst=dst_all,
             backend=backend,
             device=device,
-            precomputed_intersections=precomputed_intersections
+            precomputed_intersections=precomputed_intersections,
+            tvals=tvals,
+            use_compression=use_compression
         )
 
+
+        self.n_x = n_x
+        self.n_y = n_y
+        self.n_z = n_z
+        self.M_gantry = M_gantry
+        self.b_gantry = b_gantry
+        self.source_positions = source_positions
+        self.module_centers = module_centers
+        self.module_orientations = module_orientations
+        self.det_nx_per_module = det_nx_per_module
+        self.det_ny_per_module = det_ny_per_module
+        self.det_spacing_x = det_spacing_x
+        self.det_spacing_y = det_spacing_y
+        self.source_module_mask = source_module_mask
+        self.active_sources = active_sources
+        self.M = M
+        self.b = b
+        self.backend = backend
+        self.precomputed_intersections = precomputed_intersections
 
 
 
@@ -393,13 +429,13 @@ def build_uniform_static_3d_geometry(
         # 'up' direction = z-axis => (0,0,1)
         up = torch.tensor([0.0, 0.0, 1.0], dtype=torch.float32, device=device)
         normal = torch.tensor([nx, ny, nz], dtype=torch.float32, device=device)
-        side = torch.cross(up, normal)
+        side = torch.linalg.cross(up, normal)
         side_len = side.norm()
         if side_len < 1e-12:
             side = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32, device=device)
             side_len = 1.0
         side = side / side_len
-        up_ortho = torch.cross(normal, side)
+        up_ortho = torch.linalg.cross(normal, side)
         # orientation matrix local->gantry => columns = [side, up_ortho, normal]
         R = torch.stack([side, up_ortho, normal], dim=1)
         orientations_list.append(R)
@@ -454,6 +490,8 @@ class UniformStaticCTProjector3D(StaticCTProjector3D):
         b: torch.Tensor,  # [3]
         backend: str = "cuda",
         precomputed_intersections=False,
+        tvals: Optional[torch.Tensor] = None,
+        use_compression=True,
         device: Optional[torch.device] = None
     ):
         
@@ -495,5 +533,8 @@ class UniformStaticCTProjector3D(StaticCTProjector3D):
             b=b.to(device),
             backend=backend,
             precomputed_intersections=precomputed_intersections,
+            tvals=tvals,
+            use_compression=use_compression,
             device=device
         )
+

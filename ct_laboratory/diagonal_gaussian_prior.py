@@ -2,7 +2,7 @@ import torch
 from torch import nn
 import math
 
-class DiagonalGaussianLogPriorClosure(nn.Module):
+class DiagonalGaussianLogPrior(nn.Module):
     def __init__(self, mu: torch.Tensor, std: torch.Tensor):
         super().__init__()
         self.mu = mu.detach()

@@ -1,8 +1,8 @@
 import torch
 
 # Intersection computations for Torch or CUDA
-from .ct_projector_2d_torch import compute_intersections_2d_torch
-from .ct_projector_2d_cuda import compute_intersections_2d_cuda
+from .ct_projector_2d_torch import compute_intersections_2d_torch, forward_project_2d_torch, back_project_2d_torch
+from .ct_projector_2d_cuda import compute_intersections_2d_cuda, forward_project_2d_cuda, back_project_2d_cuda
 
 # Our new autograd Function
 from .ct_projector_2d_autograd import CTProjector2DFunction
@@ -13,7 +13,7 @@ class CTProjector2DModule(torch.nn.Module):
     Computes the 2D intersections in __init__ and stores them.
     Then uses the CTProjector2DFunction for forward/backward passes.
     """
-    def __init__(self, n_row, n_col, M, b, src, dst, backend='torch'):
+    def __init__(self, n_row, n_col, M, b, src, dst, backend='cuda'):
         """
         n_row, n_col: image shape
         M, b: 2D transform
@@ -39,6 +39,21 @@ class CTProjector2DModule(torch.nn.Module):
 
         # Store as a buffer
         self.register_buffer('tvals', tvals)
+
+    def forward_project(self, volume):
+        if self.backend == 'torch':
+            sinogram = forward_project_2d_torch(volume, self.tvals, self.M, self.b, self.src, self.dst)
+        else:
+            sinogram = forward_project_2d_cuda(volume, self.tvals, self.M, self.b, self.src, self.dst)
+        return sinogram
+    
+    def back_project(self, sinogram):
+        if self.backend == 'torch':
+            volume = back_project_2d_torch(sinogram, self.tvals, self.M, self.b, self.src, self.dst, self.n_row, self.n_col)
+        else:
+            volume = back_project_2d_cuda(sinogram, self.tvals, self.M, self.b, self.src, self.dst, self.n_row, self.n_col)
+        return volume
+
 
     def forward(self, image):
         """

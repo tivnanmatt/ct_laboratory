@@ -1,7 +1,7 @@
 import math
 import torch
 from .ct_projector_3d_module import CTProjector3DModule
-from .image_transform_3d import standard_3d_image_transform
+from .standard_image_transform import standard_image_transform_3d
 
 def build_conebeam_3d_geometry(
     n_view: int,
@@ -140,7 +140,7 @@ class ConeBeam3DProjector(CTProjector3DModule):
             volume_center_xyz=(0.0, 0.0, 0.0),
         )
 
-        M, b = standard_3d_image_transform(
+        M, b = standard_image_transform_3d(
             n_x=n_x,
             n_y=n_y,
             n_z=n_z,
