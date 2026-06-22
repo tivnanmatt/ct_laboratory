@@ -51,9 +51,9 @@ class CTProjector3DFunction(torch.autograd.Function):
             sinogram = forward_project_3d_torch(volume, tvals_arg, M, b, src, dst)
         else:
             # Fallback for CUDA
+            from .ct_projector_3d_cuda import forward_project_3d_cuda, forward_project_3d_compressed_cuda
             if ctx.is_compressed:
                 # Compressed CUDA path (chunked to save memory)
-                from .ct_projector_3d_cuda import forward_project_3d_compressed_cuda
                 tvals_u16, tvals_s, tvals_sc = tvals_arg
                 n_ray = tvals_u16.shape[0]
                 
@@ -77,12 +77,16 @@ class CTProjector3DFunction(torch.autograd.Function):
                     src_chunk = src[start:end]
                     dst_chunk = dst[start:end]
                     
+                    # Fix for expanded M, b (per-ray matrices)
+                    M_chunk = M[start:end] if M.dim() > 2 else M
+                    b_chunk = b[start:end] if b.dim() > 1 else b
+                    
                     sino_chunk = forward_project_3d_compressed_cuda(
                         volume, 
                         tvals_u16[start:end], 
                         tvals_s[start:end], 
                         tvals_sc[start:end],
-                        M, b, src_chunk, dst_chunk
+                        M_chunk, b_chunk, src_chunk, dst_chunk
                     )
                     
                     if batch_size > 1:
@@ -91,7 +95,7 @@ class CTProjector3DFunction(torch.autograd.Function):
                         sinogram[start:end] = sino_chunk.squeeze(0) if sino_chunk.ndim==2 else sino_chunk
                         
             else:
-                sinogram = forward_project_3d_cuda(volume, tvals_arg, M, b, src, dst)
+                sinogram = forward_project_3d_cuda(volume, tvals_arg, src, dst, M, b)
 
         return sinogram
 
@@ -160,7 +164,7 @@ class CTProjector3DFunction(torch.autograd.Function):
                     grad_volume += grad_vol_chunk
              else:
                 grad_volume = back_project_3d_cuda(
-                    grad_output, tvals_arg, M, b, src, dst, n_x, n_y, n_z
+                    grad_output, tvals_arg, src, dst, M, b, n_x, n_y, n_z
                 )
 
         return grad_volume, None, None, None, None, None, None, None, None

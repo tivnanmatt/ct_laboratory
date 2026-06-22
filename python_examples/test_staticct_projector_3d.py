@@ -39,6 +39,7 @@ def main():
     n_source = 200
     n_frame = n_source
     n_module = 48
+    modules_per_source = n_module // n_source if n_module > n_source else 1
     det_nx_per_module = 48
     det_ny_per_module = 16
     det_spacing_x = 1.0
@@ -84,35 +85,40 @@ def main():
         M_gantry=M_gantry,
         b_gantry=b_gantry,
         active_sources=active_src,
+        modules_per_source=modules_per_source,
         M=M_3d,
         b=b_3d,
         backend="cuda",
         device=device
     ).to(device)
 
-    src = torch.reshape(projector.src, (n_source, n_module*det_nx_per_module, det_ny_per_module, 3)).cpu()
-    dst = torch.reshape(projector.dst, (n_source, n_module*det_nx_per_module, det_ny_per_module, 3)).cpu()
+    # Calculate total number of rays: frames * active_sources_per_frame * active_modules_per_source * pixels_per_module
+    n_active_sources_per_frame = active_src.sum(dim=1)[0].item() # should be 1
+    total_rays = n_frame * n_active_sources_per_frame * modules_per_source * det_nx_per_module * det_ny_per_module
+    
+    src = torch.reshape(projector.src, (n_frame, n_active_sources_per_frame, modules_per_source, det_nx_per_module, det_ny_per_module, 3)).cpu()
+    dst = torch.reshape(projector.dst, (n_frame, n_active_sources_per_frame, modules_per_source, det_nx_per_module, det_ny_per_module, 3)).cpu()
 
     plt.figure()
     plt.axes(aspect='equal')
-    plt.plot(src[0, 0, 0, 0], src[0, 0, 0, 1], 'o', color='b')
-    plt.plot(dst[0, :, 0, 0], dst[0, :, 0, 1], 'o', color='r')
+    # Pick first frame, first active source, first module, first pixel
+    plt.plot(src[0, 0, 0, 0, 0, 0], src[0, 0, 0, 0, 0, 1], 'o', color='b')
+    plt.plot(dst[0, 0, 0, :, 0, 0], dst[0, 0, 0, :, 0, 1], 'o', color='r')
     plt.savefig(os.path.join(output_dir, "uniform_static_3d_geometry_topview.png"))
 
 
     plt.figure()
     plt.axes(aspect='equal')
-    plt.plot(src[0, 0, 0, 0], src[0, 0, 0, 2], 'o', color='b')
-    plt.plot(dst[0, :, 0, 0], dst[0, :, 0, 2], 'o', color='r')
+    plt.plot(src[0, 0, 0, 0, 0, 0], src[0, 0, 0, 0, 0, 2], 'o', color='b')
+    plt.plot(dst[0, 0, 0, :, 0, 0], dst[0, 0, 0, :, 0, 2], 'o', color='r')
     plt.savefig(os.path.join(output_dir, "uniform_static_3d_geometry_sideview.png"))
 
 
     with torch.no_grad():
         sinogram_1d = projector(phantom)
-    # For display, we can reshape to [n_frame, n_module, det_nx_per_module, det_ny_per_module].
-    # Because we used exactly 1 source active per frame => shape is [n_source, n_module, 48, 48].
-    # Then we can pick the first frame [0] for visualization
-    sinogram_4d = sinogram_1d.view(n_source, n_module, det_nx_per_module, det_ny_per_module)
+    
+    # Reshape sinogram to [n_frame, n_active_sources, n_active_modules, det_nx, det_ny]
+    sinogram_5d = sinogram_1d.view(n_frame, n_active_sources_per_frame, modules_per_source, det_nx_per_module, det_ny_per_module)
 
 
     # ------------------------
@@ -124,15 +130,14 @@ def main():
     phantom_slice = phantom[:, :, mid_z].cpu().numpy()
 
     # Show sinogram for the 0th frame
-    # shape => [n_module, 48, 48]. Let's just show sinogram_4d[0,0] => shape [48,48]
-    # or you could mosaic them, but let's just pick the first module for demonstration
-    sino_2d = sinogram_4d.reshape(n_source, n_module*det_nx_per_module, det_ny_per_module)[0].cpu().numpy()
+    # Pick first module of the first active source in the first frame
+    sino_2d = sinogram_5d[0, 0, 0].cpu().numpy()
 
     fig, axs = plt.subplots(1, 2, figsize=(10,5))
     axs[0].imshow(phantom_slice, cmap="gray", origin="lower")
     axs[0].set_title(f"3D Phantom (z={mid_z} slice)")
     axs[1].imshow(sino_2d.transpose(), cmap="gray", origin="lower", aspect="auto")
-    axs[1].set_title(f"Static 3D Sinogram (frame=0)")
+    axs[1].set_title(f"Static 3D Sinogram (frame=0, mod=0)")
     plt.tight_layout()
 
     save_path = os.path.join(output_dir, "staticct_3d_sinogram.png")

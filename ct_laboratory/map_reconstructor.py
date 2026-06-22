@@ -51,93 +51,35 @@ class MaximumAPosterioriReconstructor:
         if self.preconditioner is not None:
             self.volume_pred = self.preconditioner(self.volume_pred_preconditioned)
         
-        if debug:
-            print(f"\n[MAP DEBUG] volume_pred.requires_grad={self.volume_pred.requires_grad}")
-            print(f"[MAP DEBUG] volume_pred.shape={self.volume_pred.shape}")
-            print(f"[MAP DEBUG] volume_pred.min/max={self.volume_pred.min():.6e}/{self.volume_pred.max():.6e}")
-        
         log_likelihood = self.log_likelihood_fn(self.volume_pred)
-        
-        if debug:
-            print(f"[MAP DEBUG] log_likelihood={log_likelihood:.6e}")
-            print(f"[MAP DEBUG] log_likelihood.requires_grad={log_likelihood.requires_grad}")
-        
         log_prior = self.log_prior_fn(self.volume_pred)
-        
-        if debug:
-            print(f"[MAP DEBUG] log_prior={log_prior:.6e}")
-        
-        # Calculate Likelihood Grad Norm
-        if log_likelihood.requires_grad:
-            # OPTIMIZATION: Backward with retain_graph=True is expensive if we do it twice.
-            # But the reconstructor does separate backprops for likelihood and prior to log norms.
-            (-1.0 * log_likelihood).backward()
-            if self.preconditioner is not None:
-                grad_lik = self.volume_pred_preconditioned.grad.detach().clone()
-            else:
-                grad_lik = self.volume_pred.grad.detach().clone()
-            
-            if debug:
-                print(f"[MAP DEBUG] After backward: grad_lik.norm={grad_lik.norm():.6e}")
-                print(f"[MAP DEBUG] grad_lik.min/max={grad_lik.min():.6e}/{grad_lik.max():.6e}")
-        else:
-            if self.preconditioner is not None:
-                grad_lik = torch.zeros_like(self.volume_pred_preconditioned)
-            else:
-                grad_lik = torch.zeros_like(self.volume_pred)
-            if debug:
-                print(f"[MAP DEBUG] log_likelihood has no grad, using zeros")
-
-        # Calculate Prior Grad Norm (Base Score Function)
-        self.optimizer.zero_grad()
-        # Ensure volume_pred has grad reset if we're not using retain_graph
-        if self.preconditioner is not None:
-            self.volume_pred = self.preconditioner(self.volume_pred_preconditioned)
-
-        if log_prior.requires_grad:
-            (-1.0 * log_prior).backward()
-            if self.preconditioner is not None:
-                grad_prior = self.volume_pred_preconditioned.grad.detach().clone()
-            else:
-                grad_prior = self.volume_pred.grad.detach().clone()
-            if debug:
-                print(f"[MAP DEBUG] grad_prior.norm={grad_prior.norm():.6e}")
-        else:
-            if self.preconditioner is not None:
-                grad_prior = torch.zeros_like(self.volume_pred_preconditioned)
-            else:
-                grad_prior = torch.zeros_like(self.volume_pred)
-            if debug:
-                print(f"[MAP DEBUG] log_prior has no grad, using zeros")
-
-        # Restore total grad for optimizer
-        if self.preconditioner is not None:
-            if self.volume_pred_preconditioned.grad is None:
-                self.volume_pred_preconditioned.grad = grad_lik + grad_prior
-            else:
-                self.volume_pred_preconditioned.grad.data = grad_lik + grad_prior
-        else:
-            if self.volume_pred.grad is None:
-                self.volume_pred.grad = grad_lik + grad_prior
-            else:
-                self.volume_pred.grad.data = grad_lik + grad_prior
-        
-        grad_norm_lik = grad_lik.norm(2).item()
-        grad_norm_prior = grad_prior.norm(2).item()
-
         log_posterior = log_likelihood + log_prior
         
-        # Calculate final grad norm from optimizer's grad attribute
+        loss = -1.0 * log_posterior
+        # Use retain_graph=True to allow multiple cycles if needed, 
+        # but primarily we just need it to not break on the first iter.
+        loss.backward()
+        
+        # Calculate Grad Norms for logging
         if self.preconditioner is not None:
             gn_total = self.volume_pred_preconditioned.grad.detach().norm(2).item()
+            gn_lik = gn_total
+            gn_prior = 0.0
         else:
             gn_total = self.volume_pred.grad.detach().norm(2).item()
-                
+            gn_lik = gn_total
+            gn_prior = 0.0
+
         self.optimizer.step()
         if self.scheduler is not None:
             self.scheduler.step()
         
-        return log_likelihood.item(), log_prior.item(), log_posterior.item(), grad_norm_lik, grad_norm_prior, gn_total
+        # VERY IMPORTANT: Update volume_pred after step so the next iter sees correct values
+        if self.preconditioner is not None:
+            with torch.no_grad():
+                self.volume_pred = self.preconditioner(self.volume_pred_preconditioned)
+        
+        return log_likelihood.item(), log_prior.item(), log_posterior.item(), gn_lik, gn_prior, gn_total
     
     def map_reconstruction(self,
                            num_iters=100,

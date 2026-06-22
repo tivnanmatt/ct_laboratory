@@ -7,4 +7,13 @@ ct_laboratory/__pycache__/
 .vscode
 .idea
 *.log
-ct_laboratory.egg-info
+ct_laboratory.egg-info/
+*.png
+*.gif
+*.mp4
+*.pt
+*.pth
+*.bin
+*.dat
+output/
+*.egg-info/
