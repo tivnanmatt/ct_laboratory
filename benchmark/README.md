@@ -110,6 +110,36 @@ uint16 precompute while other jobs held memory (it completed res64:
 14.3/10.3 ms and res128: 20.2/13.1 ms); the A40 and RTX 6000 Ada RunPod
 images failed on too-old NVIDIA drivers before benchmarking.
 
+**Multi-GPU (ray-sharded) results** — `multi_gpu_projector.py`, res512 only,
+medians recorded in `lab-ops/results/benchmark-2026-07-04.md` (the scaling
+script prints to stdout rather than writing archive JSONs):
+
+| Config | Forward (ms) | Backproject (ms) | Iterations/min @512 |
+|--------|-------------:|-----------------:|--------------------:|
+| 2× RTX 4090 (AXIS03) | 39.1 | 47.0 | 697 |
+| 2× RTX 4090 (RunPod community) | 48.9 | 46.1 | 632 |
+| 4× RTX 4090 (RunPod community) | 34.4 | 39.4 | 813 |
+| 2× L40S | 32.6 | 38.6 | 843 |
+| 4× L40S | 21.4 | 28.0 | **1215** |
+| 8× L40S | 16.5 | 33.7 | 1195 |
+
+**Memory strategy for multi-GPU.** Rays are independent, so the wrapper gives
+each GPU a contiguous shard of the 2,949,120 rays with its OWN sub-projector:
+the uint16 tvals are row-sliced per shard, so an N-GPU split holds ~6.5/N GB
+of projector weights per card. The volume (~67 MB at res512) is small enough
+to replicate on every device. Forward projection runs each shard on its own
+Python thread and gathers the sinogram pieces on device 0; backprojection
+produces one partial volume per device and sums them. Cross-GPU traffic is
+host-staged through pinned CPU buffers (robust on hosts with broken PCIe
+peer-to-peer), which is also why scaling saturates: forward reaches 3.1× at
+8 GPUs, backprojection peaks at 4 GPUs (2.3×) where the per-device volume
+gathers start to dominate. Sweet spot: 4 GPUs at res512. Weight-build time
+scales near-perfectly (78 s → 12.7 s on 8 GPUs). Value analysis: multi-GPU
+buys latency, not value — iterations/min/$ drops with GPU count (L40S
+530 → 426 → 307 → 151; 4090 1346 → 929 → 598), so single community 4090s
+remain the cheapest iteration supply and sharding is for latency-critical
+paths.
+
 **Resolution scaling** (RTX 4090 AXIS03, CUDA + uint16, fwd/back ms):
 res64 ≈ single-digit ms up through **res512 = 52.7 / 71.7 ms**. The
 no-precompute path at res512 costs **6183 / 4536 ms** — precomputing

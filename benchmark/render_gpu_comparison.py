@@ -19,6 +19,19 @@ HERE = Path(__file__).resolve().parent
 ARCHIVE = HERE / "results_archive"
 OUT = HERE / "figures" / "gpu_comparison_res512.png"
 
+# Ray-sharded multi-GPU runs (multi_gpu_projector.py, host-staged transfers,
+# res512 only). Source: lab-ops/results/benchmark-2026-07-04.md — the scaling
+# script prints to stdout, so these medians were transcribed there, not into
+# the results_archive JSONs.
+MULTI_GPU = [
+    ("2× RTX 4090 (sharded, AXIS03)", 39.1, 47.0),
+    ("2× RTX 4090 (sharded, community pod)", 48.9, 46.1),
+    ("4× RTX 4090 (sharded, community pod)", 34.4, 39.4),
+    ("2× L40S (sharded)", 32.6, 38.6),
+    ("4× L40S (sharded)", 21.4, 28.0),
+    ("8× L40S (sharded)", 16.5, 33.7),
+]
+
 
 def headline_row(blob):
     """res512, cuda backend, compressed uint16 precompute row (or None)."""
@@ -47,6 +60,8 @@ def main():
         key = f"{gpu} ({stem})" if gpu in {g for _, g, _, _ in entries
                                            if sum(1 for e in entries if e[1] == gpu) > 1} else gpu
         best[key] = (fwd, bak)
+    for name, f, b in MULTI_GPU:
+        best[name] = (f, b)
     items = sorted(best.items(), key=lambda kv: kv[1][0])
 
     labels = [k for k, _ in items]
@@ -66,7 +81,7 @@ def main():
     ax.invert_yaxis()
     ax.set_xlabel("Median wall time per application (ms)")
     ax.set_title("StaticCT projector — res512 (512×512×64), 2,949,120 rays\n"
-                 "CUDA backend, uint16-compressed precomputed tvals",
+                 "CUDA, uint16 precomputed tvals; multi-GPU = ray-sharded",
                  fontsize=12)
     ax.legend(fontsize=9, frameon=False)
     ax.grid(axis="x", alpha=0.25)
