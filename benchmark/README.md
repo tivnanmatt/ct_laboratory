@@ -87,41 +87,43 @@ precomputed tvals** — the configuration the reconstruction pipeline runs in
 production. Projector resident memory ≈ 6.5 GB; peak ≈ 6.8 GB. Median of
 repeats; one forward / one backprojection of all 2,949,120 rays.
 
-| GPU | Forward (ms) | Backproject (ms) | Build (s) |
-|-----|-------------:|-----------------:|----------:|
-| H100 80GB HBM3 | **46.2** | 36.1 | 99.1 |
-| H100 NVL | 49.3 | **30.9** | 101.9 |
-| RTX 5090 | 49.4 | 37.8 | 69.0 |
-| L40S | 50.3 | 64.0 | 77.7 |
-| H100 PCIe | 51.8 | 42.9 | 105.5 |
-| RTX 4090 (RunPod) | 52.8 | 71.5 | 80.7 |
-| RTX 4090 (AXIS03, cuda:0) | 52.7 | 71.7 | 74.9 |
-| RTX PRO 6000 Blackwell | 60.9 | 33.0 | 85.5 |
-| A100 80GB PCIe | 72.5 | 71.1 | 124.2 |
-| A100-SXM4-80GB | 72.3 | 70.6 | 125.3 |
-| A100-SXM4-40GB (DGX gpu2/7/8) | 72.7–72.9 | 77.4–78.0 | 124–130 |
-| A100-SXM4-40GB (gpu5, loaded) | 101.0 | 109.0 | 170.7 |
-| A100-SXM4-40GB (gpu3, loaded) | 145.5 | 154.5 | 197.7 |
-| RTX 3090 | 355.0 | 495.5 | 115.7 |
-| RTX A5000 | 392.0 | 474.4 | 135.0 |
+Single-GPU and ray-sharded multi-GPU configurations in one table, sorted by
+forward-projection time. Multi-GPU medians are from `multi_gpu_projector.py`
+runs at res512 only, recorded in `lab-ops/results/benchmark-2026-07-04.md`
+(the scaling script prints to stdout rather than writing archive JSONs).
+
+| GPU configuration | Forward (ms) | Backproject (ms) | Build (s) | Iter pairs/min @512 |
+|-------------------|-------------:|-----------------:|----------:|--------------------:|
+| 8× L40S (sharded) | **16.5** | 33.7 | ≈12.7 | 1195 |
+| 4× L40S (sharded) | 21.4 | **28.0** | ≈20 | **1215** |
+| 2× L40S (sharded) | 32.6 | 38.6 | ≈39 | 843 |
+| 4× RTX 4090 (sharded, community) | 34.4 | 39.4 | ≈20 | 813 |
+| 2× RTX 4090 (sharded, AXIS03) | 39.1 | 47.0 | ≈38 | 697 |
+| H100 80GB HBM3 | 46.2 | 36.1 | 99.1 | 729 |
+| 2× RTX 4090 (sharded, community) | 48.9 | 46.1 | ≈40 | 632 |
+| H100 NVL | 49.3 | 30.9 | 101.9 | 748 |
+| RTX 5090 | 49.4 | 37.8 | 69.0 | 688 |
+| L40S | 50.3 | 64.0 | 77.7 | 525 |
+| H100 PCIe | 51.8 | 42.9 | 105.5 | 634 |
+| RTX 4090 (AXIS03, cuda:0) | 52.7 | 71.7 | 74.9 | 482 |
+| RTX 4090 (RunPod) | 52.8 | 71.5 | 80.7 | 483 |
+| RTX PRO 6000 Blackwell | 60.9 | 33.0 | 85.5 | 639 |
+| A100-SXM4-80GB | 72.3 | 70.6 | 125.3 | 420 |
+| A100 80GB PCIe | 72.5 | 71.1 | 124.2 | 418 |
+| A100-SXM4-40GB (DGX gpu2/7/8) | 72.7–72.9 | 77.4–78.0 | 124–130 | 399 |
+| A100-SXM4-40GB (gpu5, loaded) | 101.0 | 109.0 | 170.7 | — |
+| A100-SXM4-40GB (gpu3, loaded) | 145.5 | 154.5 | 197.7 | — |
+| RTX 3090 | 355.0 | 495.5 | 115.7 | 71 |
+| RTX A5000 | 392.0 | 474.4 | 135.0 | 69 |
+
+"Iter pairs/min" = forward+backprojection pairs per minute at res512, the unit
+of iterative-reconstruction work. Sharded build times parallelize across
+shards (measured 78 s → 12.7 s at 8 GPUs; intermediate counts estimated ∝ 1/N).
 
 Failures worth knowing: one A100-40GB node (gpu1) OOM'd at res256/512 with
 uint16 precompute while other jobs held memory (it completed res64:
 14.3/10.3 ms and res128: 20.2/13.1 ms); the A40 and RTX 6000 Ada RunPod
 images failed on too-old NVIDIA drivers before benchmarking.
-
-**Multi-GPU (ray-sharded) results** — `multi_gpu_projector.py`, res512 only,
-medians recorded in `lab-ops/results/benchmark-2026-07-04.md` (the scaling
-script prints to stdout rather than writing archive JSONs):
-
-| Config | Forward (ms) | Backproject (ms) | Iterations/min @512 |
-|--------|-------------:|-----------------:|--------------------:|
-| 2× RTX 4090 (AXIS03) | 39.1 | 47.0 | 697 |
-| 2× RTX 4090 (RunPod community) | 48.9 | 46.1 | 632 |
-| 4× RTX 4090 (RunPod community) | 34.4 | 39.4 | 813 |
-| 2× L40S | 32.6 | 38.6 | 843 |
-| 4× L40S | 21.4 | 28.0 | **1215** |
-| 8× L40S | 16.5 | 33.7 | 1195 |
 
 **Memory strategy for multi-GPU.** Rays are independent, so the wrapper gives
 each GPU a contiguous shard of the 2,949,120 rays with its OWN sub-projector:
