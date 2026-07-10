@@ -16,6 +16,7 @@ from .standard_image_transform import *
 from .nonlinear_poisson_likelihood import *
 from .linear_gaussian_likelihood import *
 from .map_reconstructor import *
+from .sparse_eigen_decomposition import *
 from .bayesian_diffusion_posterior_sampling import *
 from .quadratic_smoothness_prior import *
 from .total_variance_prior import *

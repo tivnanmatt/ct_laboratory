@@ -64,7 +64,9 @@ def test_line_integral_3d(backend="cuda"):
     if backend == "torch":
         sinogram_1d = forward_project_3d_torch(volume, tvals, A, b, src, dst)
     else:
-        sinogram_1d = forward_project_3d_cuda(volume, tvals, A, b, src, dst)
+        # CUDA backend uses signature (volume, tvals, src, dst, M, b);
+        # pass by keyword so it stays correct regardless of positional order.
+        sinogram_1d = forward_project_3d_cuda(volume, tvals, src=src, dst=dst, M=A, b=b)
     t3 = time.perf_counter()
     forward_time = t3 - t2
     print(f"[{backend}] Forward projection (line integral) computed in {forward_time:.6f} s.")

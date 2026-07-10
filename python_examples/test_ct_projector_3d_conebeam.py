@@ -131,7 +131,9 @@ def run_conebeam_experiment(
     if backend == "torch":
         sinogram_1d = forward_project_3d_torch(volume, tvals, A, b, src, dst)
     else:  # CUDA
-        sinogram_1d = forward_project_3d_cuda(volume, tvals, A, b, src, dst)
+        # CUDA backend uses signature (volume, tvals, src, dst, M, b);
+        # pass by keyword so it stays correct regardless of positional order.
+        sinogram_1d = forward_project_3d_cuda(volume, tvals, src=src, dst=dst, M=A, b=b)
         torch.cuda.synchronize()  # Ensure all CUDA operations are complete
 
     t3 = time.perf_counter()
@@ -143,7 +145,9 @@ def run_conebeam_experiment(
     if backend == "torch":
         reco = back_project_3d_torch(sinogram_1d, tvals, A, b, src, dst, n_x, n_y, n_z)
     else:  # CUDA
-        reco = back_project_3d_cuda(sinogram_1d, tvals, A, b, src, dst, n_x, n_y, n_z)
+        # CUDA backend uses signature (sinogram, tvals, src, dst, M, b, n_x, n_y, n_z).
+        reco = back_project_3d_cuda(sinogram_1d, tvals, src=src, dst=dst, M=A, b=b,
+                                    n_x=n_x, n_y=n_y, n_z=n_z)
         torch.cuda.synchronize()  # Ensure all CUDA operations are complete
     t5 = time.perf_counter()
     backward_time = t5 - t4

@@ -1,0 +1,98 @@
+{
+  "meta": {
+    "resolutions": [
+      64,
+      128,
+      256,
+      512
+    ],
+    "backends": [
+      "cuda"
+    ],
+    "torch_max_res": 64,
+    "n_rays": 2949120,
+    "repeats": 3,
+    "tag": "runpod-geforce-rtx-4090",
+    "geometry": "/opt/benchmark/geometry/geometry_80src_3rot_240view.pt",
+    "started": "2026-07-04T15:01:20",
+    "hostname": "d8c2fcec973c",
+    "platform": "Linux-6.8.0-88-generic-x86_64-with-glibc2.39",
+    "python": "3.12.3",
+    "torch": "2.12.1+cu130",
+    "cuda_available": true,
+    "cuda_version": "13.0",
+    "gpu_name": "NVIDIA GeForce RTX 4090",
+    "gpu_count": 1,
+    "gpu_total_mem_gb": 25.250627584
+  },
+  "rows": [
+    {
+      "configuration": "CUDA precomputed uint16",
+      "backend": "cuda",
+      "device": "cuda:0",
+      "precomputed": "compressed",
+      "resolution": 64,
+      "nz": 8,
+      "build_ms": 6869.3365808576345,
+      "forward_ms": 10.09148987941444,
+      "backproject_ms": 7.380099967122078,
+      "peak_gpu_mb": 949.88032,
+      "rss_mb": 1736.65234375,
+      "projector_memory_mb": 914.227248,
+      "n_rays": 2949120,
+      "status": "ok",
+      "traceback": ""
+    },
+    {
+      "configuration": "CUDA precomputed uint16",
+      "backend": "cuda",
+      "device": "cuda:0",
+      "precomputed": "compressed",
+      "resolution": 128,
+      "nz": 16,
+      "build_ms": 10180.969562847167,
+      "forward_ms": 11.779499938711524,
+      "backproject_ms": 12.832551961764693,
+      "peak_gpu_mb": 1752.827392,
+      "rss_mb": 2502.2265625,
+      "projector_memory_mb": 1716.387888,
+      "n_rays": 2949120,
+      "status": "ok",
+      "traceback": ""
+    },
+    {
+      "configuration": "CUDA precomputed uint16",
+      "backend": "cuda",
+      "device": "cuda:0",
+      "precomputed": "compressed",
+      "resolution": 256,
+      "nz": 32,
+      "build_ms": 26081.148698925972,
+      "forward_ms": 22.762996843084693,
+      "backproject_ms": 21.953212097287178,
+      "peak_gpu_mb": 3366.716928,
+      "rss_mb": 4048.70703125,
+      "projector_memory_mb": 3320.709168,
+      "n_rays": 2949120,
+      "status": "ok",
+      "traceback": ""
+    },
+    {
+      "configuration": "CUDA precomputed uint16",
+      "backend": "cuda",
+      "device": "cuda:0",
+      "precomputed": "compressed",
+      "resolution": 512,
+      "nz": 64,
+      "build_ms": 80715.05899215117,
+      "forward_ms": 52.813597954809666,
+      "backproject_ms": 71.45226211287081,
+      "peak_gpu_mb": 6752.175616,
+      "rss_mb": 7149.02734375,
+      "projector_memory_mb": 6529.351728,
+      "n_rays": 2949120,
+      "status": "ok",
+      "traceback": ""
+    }
+  ]
+}

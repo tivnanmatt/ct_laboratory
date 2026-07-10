@@ -1,0 +1,98 @@
+{
+  "meta": {
+    "resolutions": [
+      64,
+      128,
+      256,
+      512
+    ],
+    "backends": [
+      "cuda"
+    ],
+    "torch_max_res": 64,
+    "n_rays": 2949120,
+    "repeats": 3,
+    "tag": "runpod-a100-sxm4-80gb",
+    "geometry": "/opt/benchmark/geometry/geometry_80src_3rot_240view.pt",
+    "started": "2026-07-04T14:48:25",
+    "hostname": "b8c93d86b624",
+    "platform": "Linux-6.8.0-100-generic-x86_64-with-glibc2.39",
+    "python": "3.12.3",
+    "torch": "2.12.1+cu130",
+    "cuda_available": true,
+    "cuda_version": "13.0",
+    "gpu_name": "NVIDIA A100-SXM4-80GB",
+    "gpu_count": 1,
+    "gpu_total_mem_gb": 85.093777408
+  },
+  "rows": [
+    {
+      "configuration": "CUDA precomputed uint16",
+      "backend": "cuda",
+      "device": "cuda:0",
+      "precomputed": "compressed",
+      "resolution": 64,
+      "nz": 8,
+      "build_ms": 10667.05597564578,
+      "forward_ms": 12.913670390844345,
+      "backproject_ms": 9.821789339184761,
+      "peak_gpu_mb": 949.88032,
+      "rss_mb": 1724.1875,
+      "projector_memory_mb": 914.227248,
+      "n_rays": 2949120,
+      "status": "ok",
+      "traceback": ""
+    },
+    {
+      "configuration": "CUDA precomputed uint16",
+      "backend": "cuda",
+      "device": "cuda:0",
+      "precomputed": "compressed",
+      "resolution": 128,
+      "nz": 16,
+      "build_ms": 14043.454056605697,
+      "forward_ms": 20.03796026110649,
+      "backproject_ms": 13.078443706035614,
+      "peak_gpu_mb": 1752.827392,
+      "rss_mb": 2474.56640625,
+      "projector_memory_mb": 1716.387888,
+      "n_rays": 2949120,
+      "status": "ok",
+      "traceback": ""
+    },
+    {
+      "configuration": "CUDA precomputed uint16",
+      "backend": "cuda",
+      "device": "cuda:0",
+      "precomputed": "compressed",
+      "resolution": 256,
+      "nz": 32,
+      "build_ms": 37777.65845321119,
+      "forward_ms": 36.9278360158205,
+      "backproject_ms": 23.966671898961067,
+      "peak_gpu_mb": 3366.716928,
+      "rss_mb": 4037.5234375,
+      "projector_memory_mb": 3320.709168,
+      "n_rays": 2949120,
+      "status": "ok",
+      "traceback": ""
+    },
+    {
+      "configuration": "CUDA precomputed uint16",
+      "backend": "cuda",
+      "device": "cuda:0",
+      "precomputed": "compressed",
+      "resolution": 512,
+      "nz": 64,
+      "build_ms": 125300.20606517792,
+      "forward_ms": 72.32260145246983,
+      "backproject_ms": 70.59728167951107,
+      "peak_gpu_mb": 6752.175616,
+      "rss_mb": 7137.4453125,
+      "projector_memory_mb": 6529.351728,
+      "n_rays": 2949120,
+      "status": "ok",
+      "traceback": ""
+    }
+  ]
+}

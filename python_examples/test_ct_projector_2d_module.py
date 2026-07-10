@@ -18,8 +18,6 @@ def test_ct_projector_2d_module(backend='cuda'):
     # Create phantom without requires_grad first
     phantom = torch.zeros(n_row, n_col, dtype=torch.float32)
     phantom[8, :] = 1.0
-    # Mark phantom as requiring grad AFTER modification to avoid in-place ops on a leaf.
-    phantom.requires_grad_()
 
     M = torch.eye(2, dtype=torch.float32)
     b = torch.zeros(2, dtype=torch.float32)
@@ -38,6 +36,9 @@ def test_ct_projector_2d_module(backend='cuda'):
     # Use the same device for all tensors regardless of backend choice.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     phantom = phantom.to(device)
+    # Require grad AFTER moving to device so phantom stays a leaf tensor on the
+    # target device (otherwise .to(device) makes it non-leaf and .grad is None).
+    phantom.requires_grad_()
     M = M.to(device)
     b = b.to(device)
     src = src.to(device)

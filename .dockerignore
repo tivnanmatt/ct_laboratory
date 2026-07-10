@@ -1,0 +1,12 @@
+.git
+build
+outputs
+python_examples
+ct_laboratory.egg-info
+ct_laboratory/*.so
+benchmark/output
+**/__pycache__
+*.mp4
+*.pth
+env_notes.txt
+print_code.py

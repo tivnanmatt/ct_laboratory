@@ -48,6 +48,9 @@ def main():
     n_source = 200
     n_frame = n_source
     n_module = 48
+    # Number of detector modules actually active per source (drives the ray count
+    # and therefore the sinogram reshape). Matches UniformStaticCTProjector3D.
+    modules_per_source = n_module // n_source if n_module > n_source else 1
     det_nx_per_module = 48
     det_ny_per_module = 16
     det_spacing_x = 1.0
@@ -93,6 +96,7 @@ def main():
         M_gantry=M_gantry,
         b_gantry=b_gantry,
         active_sources=active_src,
+        modules_per_source=modules_per_source,
         M=M_3d,
         b=b_3d,
         backend="cuda",
@@ -108,9 +112,9 @@ def main():
         sinogram_noisy = sinogram_gt + noise_std * torch.randn_like(sinogram_gt)
 
     # We'll reshape for the "display" frames in the animation:
-    # shape => [n_frame, n_module, det_nx_per_module, det_ny_per_module]
+    # shape => [n_frame, modules_per_source, det_nx_per_module, det_ny_per_module]
     sinogram_4d = sinogram_noisy.view(
-        n_source, n_module, det_nx_per_module, det_ny_per_module
+        n_source, modules_per_source, det_nx_per_module, det_ny_per_module
     )
 
     # ---------------------------------------------------------
@@ -148,7 +152,7 @@ def main():
 
         recon_history.append(volume_recon.detach().cpu().clone())
         # Reshape the predicted sinogram to 4D => we can extract the same view
-        sino_pred_4d = sino_pred.view(n_source, n_module, det_nx_per_module, det_ny_per_module)
+        sino_pred_4d = sino_pred.view(n_source, modules_per_source, det_nx_per_module, det_ny_per_module)
         # store just that single frame=0, module=0
         sino_pred_view = sino_pred_4d[0,0].detach().cpu().clone()
 

@@ -1,0 +1,32 @@
+# Generic projector-benchmark compose. No host-specific mounts, no uid tricks:
+# outputs are chmod'd world-writable by the script, and results are also
+# printed to stdout so `docker logs` alone is enough on remote nodes.
+#
+# Build + run locally (from this directory):
+#   docker compose build
+#   docker compose run --rm projector-benchmark --resolution 250 --device cuda:0
+#
+# Push for the other nodes:
+#   docker compose push
+
+name: ct-lab-benchmark
+
+services:
+  projector-benchmark:
+    image: 172.20.157.23:5000/ct-lab-benchmark:latest
+    build:
+      context: ..
+      dockerfile: benchmark/Dockerfile
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./output:/opt/benchmark/output
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, utility, compute]
+    # default: res 250 on cuda:0; override with `docker compose run`
+    command: ["--resolution", "250", "--device", "cuda:0"]

@@ -1,0 +1,98 @@
+{
+  "meta": {
+    "resolutions": [
+      64,
+      128,
+      256,
+      512
+    ],
+    "backends": [
+      "cuda"
+    ],
+    "torch_max_res": 64,
+    "n_rays": 2949120,
+    "repeats": 3,
+    "tag": "runpod-rtx-pro-6000-blackwell-server-edition",
+    "geometry": "/opt/benchmark/geometry/geometry_80src_3rot_240view.pt",
+    "started": "2026-07-04T17:41:26",
+    "hostname": "6d94b32371d6",
+    "platform": "Linux-6.17.0-14-generic-x86_64-with-glibc2.39",
+    "python": "3.12.3",
+    "torch": "2.12.1+cu130",
+    "cuda_available": true,
+    "cuda_version": "13.0",
+    "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "gpu_count": 1,
+    "gpu_total_mem_gb": 101.973950464
+  },
+  "rows": [
+    {
+      "configuration": "CUDA precomputed uint16",
+      "backend": "cuda",
+      "device": "cuda:0",
+      "precomputed": "compressed",
+      "resolution": 64,
+      "nz": 8,
+      "build_ms": 4246.428127866238,
+      "forward_ms": 7.808882277458906,
+      "backproject_ms": 4.3283142149448395,
+      "peak_gpu_mb": 975.046144,
+      "rss_mb": 1839.07421875,
+      "projector_memory_mb": 914.227248,
+      "n_rays": 2949120,
+      "status": "ok",
+      "traceback": ""
+    },
+    {
+      "configuration": "CUDA precomputed uint16",
+      "backend": "cuda",
+      "device": "cuda:0",
+      "precomputed": "compressed",
+      "resolution": 128,
+      "nz": 16,
+      "build_ms": 8416.01152997464,
+      "forward_ms": 12.695163022726774,
+      "backproject_ms": 6.854229141026735,
+      "peak_gpu_mb": 1777.993216,
+      "rss_mb": 2602.1875,
+      "projector_memory_mb": 1716.387888,
+      "n_rays": 2949120,
+      "status": "ok",
+      "traceback": ""
+    },
+    {
+      "configuration": "CUDA precomputed uint16",
+      "backend": "cuda",
+      "device": "cuda:0",
+      "precomputed": "compressed",
+      "resolution": 256,
+      "nz": 32,
+      "build_ms": 24790.16977502033,
+      "forward_ms": 25.16885893419385,
+      "backproject_ms": 14.434193260967731,
+      "peak_gpu_mb": 3392.538112,
+      "rss_mb": 4175.95703125,
+      "projector_memory_mb": 3320.709168,
+      "n_rays": 2949120,
+      "status": "ok",
+      "traceback": ""
+    },
+    {
+      "configuration": "CUDA precomputed uint16",
+      "backend": "cuda",
+      "device": "cuda:0",
+      "precomputed": "compressed",
+      "resolution": 512,
+      "nz": 64,
+      "build_ms": 85528.0719990842,
+      "forward_ms": 60.93820184469223,
+      "backproject_ms": 32.95582067221403,
+      "peak_gpu_mb": 6776.555008,
+      "rss_mb": 7252.1328125,
+      "projector_memory_mb": 6529.351728,
+      "n_rays": 2949120,
+      "status": "ok",
+      "traceback": ""
+    }
+  ]
+}

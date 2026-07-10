@@ -18,7 +18,6 @@ def test_ct_projector_3d_module(backend='cuda'):
     # Create volume without requires_grad first, then set requires_grad
     volume = torch.zeros(n_x, n_y, n_z, dtype=torch.float32)
     volume[4, :, :] = 1.0
-    volume.requires_grad_()
 
     M = torch.eye(3, dtype=torch.float32)
     b = torch.zeros(3, dtype=torch.float32)
@@ -34,6 +33,9 @@ def test_ct_projector_3d_module(backend='cuda'):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     volume = volume.to(device)
+    # Require grad AFTER moving to device so volume stays a leaf tensor on the
+    # target device (otherwise .to(device) makes it non-leaf and .grad is None).
+    volume.requires_grad_()
     M = M.to(device)
     b = b.to(device)
     src = src.to(device)
