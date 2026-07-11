@@ -1,11 +1,13 @@
 # File: setup.py
 
-from setuptools import setup
+from setuptools import find_packages, setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 setup(
     name="ct_laboratory",
-    packages=["ct_laboratory"],
+    # include all areas (tomography, optimization, random_variable,
+    # sparse_eigen_preconditioner, bayesian_estimation, physics.*)
+    packages=find_packages(include=["ct_laboratory", "ct_laboratory.*"]),
     ext_modules=[
         CUDAExtension(
             name="ct_laboratory._C",

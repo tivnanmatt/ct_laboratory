@@ -10,27 +10,47 @@ eigendecomposition of the projector Gram operator, MAP/Bayesian reconstruction
 drivers with pluggable likelihoods, priors, and preconditioners, a spectral
 X-ray physics package, and a cross-GPU performance benchmark suite.
 
+## Package areas
+
+The package is organized into **areas** with a strict downward dependency
+order — base areas depend on nothing else in the package, composite areas
+combine them:
+
+| Area | Depends on | Contents |
+|------|-----------|----------|
+| `ct_laboratory.tomography` | — (base) | All projectors: 2D/3D torch/cuda/autograd/module layers, fan-beam, cone-beam, StaticCT ring (2D/3D), multi-rotation wrapper, ray-subset projectors, voxel→world transforms |
+| `ct_laboratory.optimization` | — (base) | `Preconditioner` abstract base class (subclasses MUST implement both `forward` and `inverse` — enforced at class definition), `IdentityPreconditioner`, `DiagonalPreconditioner`, general loss functions (`LossFunction`, `WeightedSumLoss`, `QuadraticLoss`) |
+| `ct_laboratory.random_variable` | — (base) | `RandomVariable` / `ConditionalRandomVariable` on top of `torch.distributions` (`log_prob`/`log_pdf`, `sample`, `score`); Gaussian, Poisson/Beer–Lambert, energy-based smoothness/TV variables, `FromTorchDistribution` bridge |
+| `ct_laboratory.sparse_eigen_preconditioner` | optimization + tomography | `SparseEigenDecomposition` (matrix-free eigenpairs of G = AᵀA) and the image/projection sparse-eigen preconditioners, subclassing `optimization.Preconditioner` |
+| `ct_laboratory.bayesian_estimation` | random_variable + optimization | `MaximumAPosterioriEstimator`: likelihood = a `ConditionalRandomVariable`, prior = an unconditional `RandomVariable` (no separate likelihood/prior aliases), preconditioning via a single `Preconditioner` object |
+| `ct_laboratory.physics.xray` | — (no projector deps) | Spectral X-ray measurement physics operating purely on basis line integrals |
+| `ct_laboratory.physics.ct_system` | tomography + physics.xray | `CTSystem`: projector + `XraySystem` composed into one differentiable spectral scan model |
+
+The legacy flat namespace is preserved: every pre-existing import path
+(`ct_laboratory.ct_projector_3d_module`, `ct_laboratory.map_reconstructor`,
+`ct_laboratory.sparse_eigen_decomposition`, ...) still works via
+backward-compatibility shims that alias the new area modules.
+
 ## Repository layout
 
 ```
 ct_laboratory/
 ├── ct_laboratory/            The Python package
 │   ├── _C.*.so               Compiled CUDA extension (built from src/)
-│   ├── ct_projector_2d_*.py  2D projector: torch / cuda / autograd / module
-│   ├── ct_projector_3d_*.py  3D projector: torch / cuda / autograd / module
-│   ├── ct_projector_3d_multirot.py   Multi-rotation (helical-style) wrapper
-│   ├── ct_projector_3d_subsets.py    Ordered / random ray-subset projectors
-│   ├── fanbeam_projector_2d.py       Fan-beam geometry class
-│   ├── conebeam_projector_3d.py      Circular cone-beam geometry class
-│   ├── staticct_projector_2d.py      StaticCT ring geometry (2D)
-│   ├── staticct_projector_3d.py      StaticCT ring geometry (3D)
-│   ├── sparse_eigen_decomposition.py Matrix-free eigenpairs of G = AᵀA
-│   ├── map_reconstructor.py          MAP driver + sparse-eigen preconditioners
-│   ├── *_likelihood.py               Gaussian / nonlinear Poisson likelihoods
-│   ├── *_prior.py                    Gaussian / smoothness / TV / denoiser priors
+│   ├── tomography/           BASE AREA: all projectors + grid transforms
+│   ├── optimization/         BASE AREA: Preconditioner contract + losses
+│   ├── random_variable/      BASE AREA: RandomVariable interface over
+│   │                         torch.distributions (priors & likelihoods)
+│   ├── sparse_eigen_preconditioner/  Gram eigenpairs + preconditioners
+│   ├── bayesian_estimation/  MAP estimation on random variables
+│   ├── physics/
+│   │   ├── xray/             Spectral X-ray physics (projector-free)
+│   │   └── ct_system/        Projector + XraySystem integration
+│   ├── map_reconstructor.py  Legacy MAP driver (kept for compatibility)
+│   ├── *_likelihood.py, *_prior.py   Legacy likelihood/prior modules
 │   ├── bayesian_diffusion_posterior_sampling.py  DPS reconstruction driver
-│   ├── standard_image_transform.py   Voxel-index → world (M, b) helpers
-│   └── physics/                      Spectral X-ray physics package
+│   └── ct_projector_*.py, staticct_*.py, ...     Compatibility shims →
+│                                                  tomography/
 ├── src/                      CUDA/C++ extension source (bindings + kernels)
 ├── benchmark/                Cross-GPU projector timing suite (see its README)
 ├── python_examples/          Runnable demos and tests (write to test_outputs/)
