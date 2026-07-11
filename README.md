@@ -25,6 +25,12 @@ combine them:
 | `ct_laboratory.bayesian_estimation` | random_variable + optimization | `MaximumAPosterioriEstimator`: likelihood = a `ConditionalRandomVariable`, prior = an unconditional `RandomVariable` (no separate likelihood/prior aliases), preconditioning via a single `Preconditioner` object |
 | `ct_laboratory.physics.xray` | — (no projector deps) | Spectral X-ray measurement physics operating purely on basis line integrals |
 | `ct_laboratory.physics.ct_system` | tomography + physics.xray | `CTSystem`: projector + `XraySystem` composed into one differentiable spectral scan model |
+| `ct_laboratory.linalg` | — (base) | Consolidated matrix-free `LinearSystem` stack (merged from gmi): `Identity`, `Scalar`, `DiagonalScalar`, `FourierTransform`/`FourierConvolution`, composites, conjugate/transpose/inverse wrappers, SVD/eigen-decomposed operators, bilinear/Lanczos/nearest interpolators, polar resampler, sparse row/col systems |
+| `ct_laboratory.linear_system` | — (base) | Legacy multi-file `LinearSystem` stack (merged from gmi); parallel to `linalg`, kept because `sde` targets it. One class per file (`base`, `composite`, `scalar`, `identity`, `fourier_*`, …) plus vendored hydra configs for the test suite |
+| `ct_laboratory.sde` | linear_system | Stochastic differential equations (merged from gmi): `StochasticDifferentialEquation`, `LinearSDE`, `ScalarSDE`, `VarianceExploding/PreservingSDE`, `StandardWienerSDE`, `Diagonal/FourierSDE` |
+| `ct_laboratory.diffusion` | sde + linear_system + random_variable_gmi + samplers | Diffusion models (merged from gmi): `DiffusionModel`, `DiffusionPosteriorModel`, reverse-process + DPS samplers. Heavy deps (wandb, torch_ema, hydra) load lazily; the gmi `datasets` area was **not** merged, so real-data training/sampling needs areas outside this repo |
+| `ct_laboratory.random_variable_gmi` | linalg + linear_system + sde + samplers | gmi's random-variable stack (Gaussian/Uniform/LogNormal/Categorical + measurement simulator). Renamed from gmi's `random_variable` to avoid colliding with the native `ct_laboratory.random_variable` |
+| `ct_laboratory.samplers`, `.config`, `.train` | — | Support modules pulled in by the diffusion stack (base `Sampler`, config object loader, training loop). `train` imports `torch_ema` only when used |
 
 The legacy flat namespace is preserved: every pre-existing import path
 (`ct_laboratory.ct_projector_3d_module`, `ct_laboratory.map_reconstructor`,
@@ -205,6 +211,37 @@ A composable, differentiable spectral CT forward model. Submodules:
   with Poisson statistics and consistent tensor shapes
   (`x_basis: [n_rays, n_materials]`, `y: [n_rays, n_channels]`).
 
+## Merged generative stack (from gmi)
+
+The linear-algebra, SDE, and diffusion areas were merged in from the
+**Generative Medical Imaging (gmi)** package to make its matrix-free operators
+and diffusion models usable alongside the CT projectors. All are pure-PyTorch
+(no CUDA extension required) and run on CPU or GPU.
+
+- **`linalg`** and **`linear_system`** are two parallel `LinearSystem`
+  hierarchies that both came from gmi (a consolidated single-package version
+  and the older one-class-per-file version). Both are kept: `linalg` is the
+  richer/newer API; `linear_system` is retained because `sde` imports from it.
+  A `LinearSystem` exposes `forward`/`transpose`/`conjugate`/`inverse` and
+  composes (`CompositeLinearSystem`, transpose/conjugate/inverse wrappers).
+- **`sde`** builds forward/reverse stochastic processes on top of
+  `linear_system` operators (the diffusion term of an SDE returns a
+  `LinearSystem`).
+- **`diffusion`** composes an SDE, a backbone `nn.Module`, a training-time
+  sampler, and a loss into a `DiffusionModel` with training-loss and
+  reverse-process/DPS sampling. The gmi `datasets` area was **deliberately not
+  merged**, so the built-in data-loading training entry points require modules
+  that live outside this repo; use the dataset-free path (supply your own
+  tensors and backbone) for standalone use.
+
+What was intentionally left in gmi: `datasets`, `network`, `models`, `tasks`,
+`loss_function`, and the CLI. The `random_variable` area was renamed to
+`random_variable_gmi` here to avoid colliding with the native
+`ct_laboratory.random_variable`.
+
+Regression tests for the whole merged stack live in
+`python_examples/gmi_merge_tests/` (see below).
+
 ## CUDA extension (`src/`)
 
 `bindings.cpp` (pybind11) builds the `ct_laboratory._C` module exposing the
@@ -247,6 +284,11 @@ All scripts run standalone and write PNGs/MP4s to
   sources).
 - **Timing** — `timing_sparse_eig_k64.py`: `SparseEigenDecomposition` k=64 on
   the uniform StaticCT 3D projector.
+- **Merged-stack tests** — `gmi_merge_tests/` is a pytest suite (313 ported
+  from gmi + 6 new) covering `linalg`, `linear_system`, `sde`, and dataset-free
+  `diffusion` smoke tests. Runs on CPU:
+  `PYTHONPATH=. python -m pytest python_examples/gmi_merge_tests -q`
+  (319 passing).
 
 ## Benchmark suite (`benchmark/`)
 
