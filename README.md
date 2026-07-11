@@ -31,6 +31,12 @@ combine them:
 | `ct_laboratory.diffusion` | sde + linear_system + random_variable_gmi + samplers | Diffusion models (merged from gmi): `DiffusionModel`, `DiffusionPosteriorModel`, reverse-process + DPS samplers. Heavy deps (wandb, torch_ema, hydra) load lazily; the gmi `datasets` area was **not** merged, so real-data training/sampling needs areas outside this repo |
 | `ct_laboratory.random_variable_gmi` | linalg + linear_system + sde + samplers | gmi's random-variable stack (Gaussian/Uniform/LogNormal/Categorical + measurement simulator). Renamed from gmi's `random_variable` to avoid colliding with the native `ct_laboratory.random_variable` |
 | `ct_laboratory.samplers`, `.config`, `.train` | — | Support modules pulled in by the diffusion stack (base `Sampler`, config object loader, training loop). `train` imports `torch_ema` only when used |
+| `ct_laboratory.network` | — (base) | Neural-network building blocks (merged from gmi): native `SimpleCNN` (2D/3D), `DenseNet`, `LinearConv`, `LambdaLayer`, and a new native `ConfigurableUNet` (2D **and** 3D, optional timestep embedding, no `diffusers` dep). The diffusers-backed `DiffusersUnet2D`, `DiffusersUnet2D_Size28`, and `MedMNISTDiffusion` load lazily so the area imports without `diffusers` |
+| `ct_laboratory.loss_function` | — (base) | `inv_t_weighted_mse` (merged from gmi). Note: the 1/t weighting is currently commented out in the source, so it is plain MSE despite the name |
+| `ct_laboratory.lr_scheduler` | — (base) | `LinearWarmupLRScheduler` (merged from gmi): `LambdaLR` subclass with a linear warmup to the base LR |
+| `ct_laboratory.tasks` | datasets(core) + train + samplers + config + random_variable_gmi | `ImageReconstructionTask` (merged from gmi). `torch_ema` is an optional training dep (guarded) |
+| `ct_laboratory.commands` | diffusion + tasks + config | CLI training entry points (`train_diffusion_model`, `train_image_reconstructor`). `visualize_dataset` needs the un-merged `datasets` implementations |
+| `ct_laboratory.datasets` | samplers | Only the dataset base classes (`GMI_Dataset`, `GeneralPurposeDataset`) were merged, to satisfy `tasks`. Concrete datasets (mnist/medmnist/synthrad) were intentionally not brought over |
 
 The legacy flat namespace is preserved: every pre-existing import path
 (`ct_laboratory.ct_projector_3d_module`, `ct_laboratory.map_reconstructor`,
@@ -284,11 +290,12 @@ All scripts run standalone and write PNGs/MP4s to
   sources).
 - **Timing** — `timing_sparse_eig_k64.py`: `SparseEigenDecomposition` k=64 on
   the uniform StaticCT 3D projector.
-- **Merged-stack tests** — `gmi_merge_tests/` is a pytest suite (313 ported
-  from gmi + 6 new) covering `linalg`, `linear_system`, `sde`, and dataset-free
-  `diffusion` smoke tests. Runs on CPU:
+- **Merged-stack tests** — `gmi_merge_tests/` is a pytest suite covering
+  `linalg`, `linear_system`, `sde`, dataset-free `diffusion` smoke tests, the
+  `network` area (native `SimpleCNN` 2D/3D + `ConfigurableUNet` 2D/3D, plus
+  diffusers-gated 2D U-Nets), and `loss_function` / `lr_scheduler`. Runs on CPU:
   `PYTHONPATH=. python -m pytest python_examples/gmi_merge_tests -q`
-  (319 passing).
+  (345 passing; the diffusers-backed tests are skipped if `diffusers` is absent).
 
 ## Benchmark suite (`benchmark/`)
 
