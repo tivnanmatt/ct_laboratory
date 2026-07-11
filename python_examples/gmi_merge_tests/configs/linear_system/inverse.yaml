@@ -1,0 +1,9 @@
+# Inverse Linear Operator Configuration
+# This config demonstrates how to create an inverse linear operator
+
+_target_: ct_laboratory.linear_system.inverse.InverseLinearSystem
+
+# Base operator to invert (using a scalar operator as example)
+base_matrix_operator:
+  _target_: ct_laboratory.linear_system.scalar.Scalar
+  scalar: 2.0 

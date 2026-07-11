@@ -1,0 +1,4 @@
+_target_: ct_laboratory.linear_system.conjugate_transpose.ConjugateTransposeLinearSystem
+base_matrix_operator:
+  _target_: ct_laboratory.linear_system.scalar.Scalar
+  scalar: 2.0 
