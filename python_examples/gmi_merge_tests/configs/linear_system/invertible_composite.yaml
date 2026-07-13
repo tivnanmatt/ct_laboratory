@@ -1,0 +1,6 @@
+_target_: ct_laboratory.linear_system.invertible_composite.InvertibleCompositeLinearSystem
+matrix_operators:
+  - _target_: ct_laboratory.linear_system.scalar.Scalar
+    scalar: 2.0
+  - _target_: ct_laboratory.linear_system.scalar.Scalar
+    scalar: 3.0 

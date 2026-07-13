@@ -1,0 +1,2 @@
+_target_: ct_laboratory.linear_system.diagonal.DiagonalScalar
+diagonal_vector: [2.0, 3.0, 4.0]
