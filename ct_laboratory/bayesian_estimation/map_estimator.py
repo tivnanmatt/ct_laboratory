@@ -70,10 +70,18 @@ class MaximumAPosterioriEstimator:
         self.prior_weight = float(prior_weight)
         self._shape = x_init.shape
 
-        with torch.no_grad():
-            z0 = preconditioner.inverse(x_init.detach())
-        self.z = z0.clone().detach().requires_grad_(True)
-        self.optimizer = torch.optim.SGD([self.z], lr=lr)
+        # The estimate x is the optimization variable; the preconditioner is
+        # applied as a LINEAR OPERATOR to the gradient, never differentiated
+        # through. Because every ct_laboratory preconditioner is a symmetric
+        # square root of the approximate inverse Hessian (F = P^2), the
+        # preconditioned search direction is F g = P(P(g)); this is identical to
+        # the x = P(z) change of variables for symmetric P, but does not require
+        # P.forward to be autograd-differentiable. That distinction matters: the
+        # projection-domain preconditioner calls the projector's back_project
+        # internally, which is a raw kernel (not an autograd Function), so
+        # differentiating through it would give a wrong gradient.
+        self.x_var = x_init.detach().clone().requires_grad_(True)
+        self.optimizer = torch.optim.SGD([self.x_var], lr=lr)
         self.scheduler = None
         if warmup_iters is not None:
             self.scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -82,9 +90,8 @@ class MaximumAPosterioriEstimator:
 
     @property
     def x(self):
-        """Current estimate in the original variable, x = P(z)."""
-        with torch.no_grad():
-            return self.preconditioner(self.z).reshape(self._shape)
+        """Current estimate."""
+        return self.x_var.detach().reshape(self._shape)
 
     def negative_log_posterior(self, x):
         log_likelihood = self.likelihood.log_prob(self.measurements, x)
@@ -95,9 +102,15 @@ class MaximumAPosterioriEstimator:
     def step(self):
         """One preconditioned gradient step; returns (loss, log_lik, log_prior)."""
         self.optimizer.zero_grad()
-        x = self.preconditioner(self.z).reshape(self._shape)
-        loss, log_likelihood, log_prior = self.negative_log_posterior(x)
+        loss, log_likelihood, log_prior = self.negative_log_posterior(
+            self.x_var.reshape(self._shape))
         loss.backward()
+        # Replace the raw gradient g with the preconditioned direction F g =
+        # P(P(g)); the preconditioner runs OUTSIDE the autograd graph.
+        with torch.no_grad():
+            g = self.x_var.grad.reshape(-1)
+            direction = self.preconditioner(self.preconditioner(g))
+            self.x_var.grad = direction.reshape(self.x_var.shape)
         self.optimizer.step()
         if self.scheduler is not None:
             self.scheduler.step()

@@ -11,12 +11,18 @@ class DiagonalGaussianRandomVariable(RandomVariable):
     def __init__(self, mu, var=1.0):
         super().__init__()
         mu = torch.as_tensor(mu)
-        var = torch.as_tensor(var, dtype=mu.dtype)
-        self.register_buffer("mu", mu)
-        self.register_buffer("var", torch.broadcast_to(var, mu.shape).clone())
+        # var must follow mu's device/dtype: for a conditional Gaussian whose
+        # mean is op(x) on the GPU, a CPU-scalar var would break log_prob.
+        var = torch.as_tensor(var, dtype=mu.dtype, device=mu.device)
+        self.mu = mu
+        self.var = torch.broadcast_to(var, mu.shape).contiguous()
 
     def _dist(self):
-        return torch.distributions.Normal(self.mu, self.var.sqrt())
+        # validate_args=False: during optimization the mean can transiently go
+        # non-finite (e.g. a too-large step); we want a nan/inf loss the caller
+        # can see, not a cryptic distribution-validation exception.
+        return torch.distributions.Normal(self.mu, self.var.sqrt(),
+                                          validate_args=False)
 
     def log_prob(self, x):
         return self._dist().log_prob(x).sum()
