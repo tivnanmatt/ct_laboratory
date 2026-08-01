@@ -9,3 +9,4 @@ preconditioners).
 from .sparse_eigen_decomposition import SparseEigenDecomposition
 from .preconditioners import (SparseEigenImagePreconditioner,
                               SparseEigenProjectionPreconditioner)
+from .weighted_preconditioner import WeightedSpectralSqrtPreconditioner

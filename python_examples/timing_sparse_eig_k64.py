@@ -12,7 +12,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device={device}")
 
-    n_source = 200
+    n_source = 80
     n_frame = n_source
     n_module = 48
     modules_per_source = n_module // n_source if n_module > n_source else 1
@@ -20,7 +20,7 @@ def main():
     det_ny_per_module = 16
     det_spacing_x = 1.0
     det_spacing_y = 2.0
-    source_radius = 380.00
+    source_radius = 480.00
     module_radius = 366.70
     source_z_offset = 0.0
     module_z_offset = 0.0
