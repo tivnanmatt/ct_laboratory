@@ -1,5 +1,8 @@
 import torch
 
+# Common base class shared with the voxel-driven projector
+from .projector_3d_base import Projector3D
+
 # Intersection computations
 from .ct_projector_3d_torch import compute_intersections_3d_torch, compress_tvals_to_uint16
 from .ct_projector_3d_cuda import compute_intersections_3d_cuda
@@ -25,7 +28,7 @@ from .ct_projector_3d_autograd import CTProjector3DFunction
 import gc
 
 
-class CTProjector3DModule(torch.nn.Module):
+class CTProjector3DModule(Projector3D):
     """
     CT projector module supporting precomputed or on-the-fly Siddon projection.
     """
@@ -242,6 +245,14 @@ class CTProjector3DModule(torch.nn.Module):
         self.precomputed_intersections = True
 
     @property
+    def kind(self):
+        return "ray"
+
+    @property
+    def n_ray(self):
+        return int(self.src.shape[0])
+
+    @property
     def tvals(self):
         if self.tvals_uint16 is not None:
             from .ct_projector_3d_torch import decompress_tvals_from_uint16
@@ -315,3 +326,8 @@ def precompute_tvals_stitched(
         return full_cpu[:, :max_cols].contiguous()
 
 
+# ---------------------------------------------------------------------------
+# Ray-driven projector alias.  The voxel-driven counterpart is VoxelProjector3D
+# (voxel_projector_3d_module.py); both derive from Projector3D.
+# ---------------------------------------------------------------------------
+RayProjector3D = CTProjector3DModule

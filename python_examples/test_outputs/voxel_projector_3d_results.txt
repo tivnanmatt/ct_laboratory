@@ -1,0 +1,74 @@
+==============================================================================
+VoxelProjector3D (separable footprints) test
+==============================================================================
+volume 48x48x8 @ 2.5 mm; 16 sources x 5 panels x 32x16 px (1.8x2.0 mm) -> 80 views, 40,960 pixels
+voxel projector: VoxelProjector3D(kind=voxel(SF-TR), backend=cuda, volume=(48, 48, 8), n_view=80, n_pix=40960, cache=none (on-the-fly))
+ray   projector: CTProjector3DModule(kind=ray, volume=(48, 48, 8), n_ray=40960)
+
+[1] class hierarchy
+  RayProjector3D is CTProjector3DModule: True
+  kinds: voxel='voxel', ray='ray';  n_ray 40960 == 40960   PASS
+
+[2] single-voxel footprint normalisation
+  view (src 0, module 12): sum_pix w  SF = 13.9651   analytic V m^2/(du dv cos) = 13.9649   ratio 1.0000
+  all views: sum SF = 218.675   sum Siddon 16-subray = 220.456 (ratio 0.9919)   sum Siddon 1-ray = 186.564 (ratio 1.1721)
+  PASS (within 2%)
+
+[3] adjoint test  <A x, y>  vs  <x, A^T y>
+  on-the-fly : <Ax,y> = 904751.875000   <x,A^T y> = 904751.875000   rel err 0.00e+00
+  precomputed footprints: nnz = 3,336,886  (26.8 MB, 181.0 pixels per voxel, 81.5 voxels per pixel)
+  CSR        : <Ax,y> = 904751.875000   <x,A^T y> = 904751.875000   rel err 0.00e+00
+  ray-driven : <Ax,y> = 906800.125000   <x,A^T y> = 906800.187500   rel err 6.89e-08   (reference)
+  PASS (rel err < 1e-4)
+
+[4] CSR footprints vs on-the-fly kernels
+  forward max|diff|/max = 7.49e-07   back max|diff|/max = 2.18e-07
+  PASS
+
+[5] autograd: d/dx <A x, y>  ==  A^T y
+  max|grad - A^T y| / max = 0.00e+00   PASS
+
+[6] pixel valid mask
+  masked view 3 and rows 0-3 of view 7 are exactly zero: True;  adjoint rel err 7.05e-08   nnz 3,270,619 (vs 3,336,886 unmasked)
+  PASS
+
+[7] soft sphere phantom: SF vs ray-driven Siddon
+  line integrals: max SF 71.001  max Siddon 71.053 mm
+  SF vs Siddon 1 ray/pixel   : rel RMS 0.0025   max|diff| 0.6249 mm
+  SF vs Siddon 16 subrays/px : rel RMS 0.0003   max|diff| 0.0976 mm
+  (Siddon 1 ray vs 16 subrays: rel RMS 0.0024  <- pixel-area vs centre-ray, ray model itself)
+  NOTE ray-driven Siddon with uint16-COMPRESSED tvals vs float tvals: rel RMS 0.0213   max|diff| 4.8818 mm  <- pre-existing error of the compressed path on grid-axis-aligned rays
+  PASS (SF within 1% of the 16-subray reference)
+  [7b] convergence with voxel size (same geometry, same sphere):
+     voxel 2.50 mm (48^2x8): SF vs 16-subray rel RMS 0.0003   max|diff| 0.098 mm
+     voxel 1.25 mm (96^2x16): SF vs 16-subray rel RMS 0.0002   max|diff| 0.069 mm
+  [4b] column cache: entries 39994 (1.5 MB); rel RMS vs on-the-fly fwd 1.4e-07 back 5.2e-08  PASS
+  [7c] row of 48 voxels along x, grid-aligned source 0, column 14: exact 120.00 mm;  SF 120.00   Siddon float 120.00   Siddon compressed 118.30
+
+[8] uniform volume (all ones): SF vs Siddon
+  SF vs 16-subray: rel RMS 0.0004;  SF vs 1-ray: rel RMS 0.0085;  max path SF 168.74 vs Siddon 168.76 mm (volume is 120 mm wide)
+  PASS
+
+[9] timing on a larger geometry
+  volume 64x64x16 (65,536 voxels), 192 views, 196,608 pixels
+  method                            precompute   forward      back
+  voxel SF, on-the-fly                       -      0.2ms      0.2ms
+  voxel SF, CSR footprints               1.3ms      0.6ms      0.6ms   nnz 19,962,554 (160 MB)
+  ray Siddon, compressed tvals         143.6ms      0.4ms      0.5ms   tvals 58 MB
+  adjoint rel err at this size: 0.00e+00
+
+[10] CGLS reconstruction of the sphere with the voxel projector (30 iterations)
+  RMSE inside r<50mm, sampled slices:  voxel-SF recon 0.0478   ray-Siddon recon 0.0455   (phantom max 1.0)
+
+==============================================================================
+  hierarchy            PASS
+  normalisation        PASS
+  adjoint              PASS
+  CSR==on-the-fly      PASS
+  autograd             PASS
+  valid mask           PASS
+  sphere vs Siddon     PASS
+  uniform vs Siddon    PASS
+  CGLS recon           PASS
+  overall: PASS
+==============================================================================

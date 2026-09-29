@@ -12,9 +12,14 @@ from .ct_projector_2d_module import *
 from .ct_projector_3d_torch import *
 from .ct_projector_3d_cuda import *
 from .ct_projector_3d_autograd import *
+from .projector_3d_base import *
 from .ct_projector_3d_module import *
 from .ct_projector_3d_multirot import *
 from .ct_projector_3d_subsets import *
+from .voxel_projector_3d_cuda import *
+from .voxel_projector_3d_torch import *
+from .voxel_projector_3d_autograd import *
+from .voxel_projector_3d_module import *
 from .fanbeam_projector_2d import *
 from .conebeam_projector_3d import *
 from .staticct_projector_2d import *

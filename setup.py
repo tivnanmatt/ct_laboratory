@@ -14,7 +14,8 @@ setup(
             sources=[
                 "src/bindings.cpp",
                 "src/ct_projector_2d.cu",
-                "src/ct_projector_3d.cu"
+                "src/ct_projector_3d.cu",
+                "src/sf_projector_3d.cu",   # voxel-driven separable-footprint projector
             ],
             extra_compile_args={
                 "cxx": ["-O2"],
