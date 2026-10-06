@@ -7,7 +7,8 @@ geometry and cache, so every device does 1/N of the work and holds 1/N of the ca
     forward:  volume --copy--> every device --A_d--> y_d --copy--> output device, concatenated
     back:     y --split--> y_d on device d --A_d^T--> x_d --copy--> output device, summed
 
-Kernels on different devices run concurrently because CUDA launches are asynchronous:
+Kernels on different devices run concurrently because CUDA launches are asynchronous
+(every construction and call runs under torch.cuda.device(d): the kernels use the current device):
 all devices are launched first and gathered afterwards. Consumer GPUs (RTX 4090/5090) have
 no peer-to-peer access, so the copies go through host memory; that copy cost (one volume per
 device per call) is what limits the speed-up at small sizes.
@@ -87,18 +88,23 @@ class MultiDeviceProjector3D(Projector3D):
 
     def forward_project(self, volume: torch.Tensor) -> torch.Tensor:
         volume = volume.detach().contiguous()
+        # 1) all copies first: a cross-device copy waits for the SOURCE device's queued work,
+        #    so copying after launching device 0's projection would serialise the devices
+        xs = [volume.to(d, non_blocking=True) for d in self.devices]
         outs = []
-        for p, d in zip(self.parts, self.devices):          # launch every device first ...
+        for p, d, x in zip(self.parts, self.devices, xs):   # 2) launch every device
             with torch.cuda.device(d) if d.type == "cuda" else _null():
-                outs.append(p.forward_project(volume.to(d, non_blocking=True)))
-        return torch.cat([y.to(self.output_device, non_blocking=True) for y in outs], dim=-1)  # ... then gather
+                outs.append(p.forward_project(x))
+        return torch.cat([y.to(self.output_device, non_blocking=True) for y in outs], dim=-1)  # 3) gather
 
     def back_project(self, sinogram: torch.Tensor) -> torch.Tensor:
         sinogram = sinogram.detach().contiguous()
+        ys = [y.to(d, non_blocking=True).contiguous()               # copies first (see forward_project)
+              for d, y in zip(self.devices, torch.split(sinogram, self._sizes, dim=-1))]
         outs = []
-        for p, d, y in zip(self.parts, self.devices, torch.split(sinogram, self._sizes, dim=-1)):
+        for p, d, y in zip(self.parts, self.devices, ys):
             with torch.cuda.device(d) if d.type == "cuda" else _null():
-                outs.append(p.back_project(y.to(d, non_blocking=True).contiguous()))
+                outs.append(p.back_project(y))
         acc = outs[0].to(self.output_device, non_blocking=True).clone()
         for x in outs[1:]:
             acc += x.to(self.output_device, non_blocking=True)
@@ -143,7 +149,9 @@ def split_voxel_projector(n_x, n_y, n_z, M, b, views, valid=None, devices=None, 
     parts = []
     for k in range(n):
         v0, v1 = cuts[k], cuts[k + 1]
-        val = None if valid_flat is None else valid_flat[int(off[v0]):int(off[v1])].to(devices[k])
-        parts.append(VoxelProjector3D(n_x, n_y, n_z, M.to(devices[k]), b.to(devices[k]), views[v0:v1],
-                                      valid=val, device=devices[k], **kwargs))
+        # the CUDA kernels launch on the CURRENT device, so the cache precompute must run under its device
+        with torch.cuda.device(devices[k]) if devices[k].type == "cuda" else _null():
+            val = None if valid_flat is None else valid_flat[int(off[v0]):int(off[v1])].to(devices[k])
+            parts.append(VoxelProjector3D(n_x, n_y, n_z, M.to(devices[k]), b.to(devices[k]), views[v0:v1],
+                                          valid=val, device=devices[k], **kwargs))
     return MultiDeviceProjector3D(parts, output_device=output_device or devices[0])
