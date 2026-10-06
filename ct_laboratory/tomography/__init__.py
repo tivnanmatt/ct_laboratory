@@ -20,6 +20,7 @@ from .voxel_projector_3d_cuda import *
 from .voxel_projector_3d_torch import *
 from .voxel_projector_3d_autograd import *
 from .voxel_projector_3d_module import *
+from .multi_device_projector_3d import *
 from .fanbeam_projector_2d import *
 from .conebeam_projector_3d import *
 from .staticct_projector_2d import *
