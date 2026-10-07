@@ -19,14 +19,17 @@ class RemoteStore:
         """``host`` is an ssh alias or ``user@ip``; ``root`` the server's asset-store root."""
         self.host, self.root = host, root.rstrip("/")
         extra = tuple(os.environ.get("SCT_SSH_OPTS", "").split())   # e.g. "-F /dev_ws/.ssh/config" inside a container
-        self.ssh = ["ssh", *extra, *ssh_opts, host]
+        self.ssh = ["ssh", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4", "-o", "ConnectTimeout=30", *extra, *ssh_opts, host]
 
     RETRIES, BACKOFF_S = 4, 10
 
-    def run(self, cmd: str, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
+    def run(self, cmd: str, check: bool = True, capture: bool = False, timeout: float | None = 120.0) -> subprocess.CompletedProcess:
         """ssh and run cmd; an ssh-level failure (rc 255: dropped connection) is retried with backoff."""
         for attempt in range(self.RETRIES):
-            r = subprocess.run([*self.ssh, cmd], text=True, capture_output=capture)
+            try:
+                r = subprocess.run([*self.ssh, cmd], text=True, capture_output=capture, timeout=timeout)
+            except subprocess.TimeoutExpired:            # hung session (happens on overloaded hosts): treat like a drop
+                r = subprocess.CompletedProcess([*self.ssh, cmd], 255, "", "ssh timeout")
             if r.returncode != 255:
                 break
             time.sleep(self.BACKOFF_S * (attempt + 1))

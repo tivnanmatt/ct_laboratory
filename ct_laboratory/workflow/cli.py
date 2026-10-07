@@ -79,7 +79,7 @@ def cmd_run(a):
            f"echo {rcfg} > /tmp/sct_job.yaml && "
            f"{ctlab} run {shlex.quote(a.skill)} /tmp/sct_job.yaml -s {shlex.quote(rsess)} --json")
     print(f"running {a.skill} on {a.remote} ...", flush=True)
-    r = remote.run(cmd, check=False, capture=True)
+    r = remote.run(cmd, check=False, capture=True, timeout=None)     # the job itself may run for hours
     sys.stdout.write(r.stdout[-4000:] if len(r.stdout) > 4000 else r.stdout)
     if r.returncode != 0:
         sys.stderr.write(r.stderr[-4000:]); sys.exit(f"remote job failed (rc {r.returncode})")
