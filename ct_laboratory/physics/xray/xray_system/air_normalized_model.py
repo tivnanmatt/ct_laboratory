@@ -13,6 +13,7 @@ Paper notation (ybar = G S_2 S_1 S_0 exp(-Q l)) extended with off-focal radiatio
           O_j  object scatter, one Klein-Nishina point at the centroid      (CentroidKleinNishinaScatter)
   scatter = 'binned':
     t_j = (1 - a_g,j) [ (1 - g) P_j + g G_j ] + a_ph,j                       (BinnedAdditiveScatter, 8 x 8 mm flat bins)
+          optional ScatterSpectrum: a_g, a_ph are multiplied by the per-pixel detection ratio of the scatter spectrum
 
 Check (air, l = 0): physical -> [(1-g-r) + g + r F_bar/F] / [1 - r + r F_bar/F] = 1;  binned -> 1 - a_g + a_ph (= 1 when the
 gain- and phantom-scan scatter are equal, as they must be in air).
@@ -29,16 +30,17 @@ import torch
 
 
 class AirNormalizedProjectionModel(torch.nn.Module):
-    def __init__(self, source, detector, off_focal, room=None, object_scatter=None, binned=None, focal_blur=None):
+    def __init__(self, source, detector, off_focal, room=None, object_scatter=None, binned=None, focal_blur=None, scatter_spectrum=None):
         super().__init__()
         self.source, self.detector, self.off_focal = source, detector, off_focal
+        self.scatter_spectrum = scatter_spectrum
         self.room, self.object_scatter, self.binned, self.focal_blur = room, object_scatter, binned, focal_blur
         self.scatter = 'binned' if binned is not None else 'physical'
 
     def parameter_sets(self):
         """{component: PriorParameters} of all components present"""
         out = dict(source=self.source.params, detector=self.detector.params, off_focal=self.off_focal.params)
-        for k in ('room', 'object_scatter', 'binned'):
+        for k in ('room', 'object_scatter', 'binned', 'scatter_spectrum'):
             m = getattr(self, k)
             if m is not None:
                 out[k] = m.params
@@ -67,6 +69,10 @@ class AirNormalizedProjectionModel(torch.nn.Module):
         if self.scatter == 'binned':
             pre = (1 - g) * P + g * G
             ag = self.binned.gain_field(); aph = self.binned.phantom_field(phantom_field)
+            if self.scatter_spectrum is not None:                              # per-pixel detection of the scatter spectrum
+                rho = self.scatter_spectrum.detection_ratio(self.source, self.detector, cos_inc)
+                ag, aph = ag * rho, aph * rho
+                out.update(detection_ratio=rho)
             out.update(t=(1 - ag) * pre + aph, primary=(1 - ag) * (1 - g) * P, off_focal=(1 - ag) * g * G,
                        scatter=aph, gain_scatter=ag, denominator=torch.ones_like(T), primary_weight=(1 - ag) * (1 - g))
             return out

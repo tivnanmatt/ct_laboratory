@@ -69,7 +69,8 @@ class AirNormalizedGaussian(torch.nn.Module):
         return 0.5 * torch.where(mask, (t - m) ** 2 / v + torch.log(v), z).double().sum()
 
     @staticmethod
-    def profiled_scale(t, m0, v, mask):
-        """closed-form per-firing output factor s = argmin sum (t - s m0)^2 / v  (treated as constant in the gradient)"""
+    def profiled_scale(t, m0, v, mask, detach=False):
+        """closed-form per-firing output factor s = argmin sum (t - s m0)^2 / v  (differentiable unless detach)"""
         z = torch.zeros_like(t)
-        return (torch.where(mask, t * m0 / v, z).sum() / torch.where(mask, m0 * m0 / v, z).sum().clamp(min=1e-9)).detach()
+        s = torch.where(mask, t * m0 / v, z).sum() / torch.where(mask, m0 * m0 / v, z).sum().clamp(min=1e-9)
+        return s.detach() if detach else s

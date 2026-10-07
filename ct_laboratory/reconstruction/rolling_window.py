@@ -101,6 +101,7 @@ class ProjectorSpec:
     n_win: int | None = None                 # None: what the cone covers
     rotations: list[int] | None = None       # model rotation indices used (None: all); must be equally spaced
     cache: str = "column"
+    z_center: float | None = None            # centre of the (forced) window in mm; None: centre of the cone's z extent
 
     def selected(self, geom: StepAndShootGeometry) -> tuple[StepAndShootGeometry, list[int]]:
         """(geometry restricted to the selected rotations, their indices into the sinogram rows)"""
@@ -117,17 +118,17 @@ class ProjectorSpec:
 
     def build(self, geom: StepAndShootGeometry, devices: list[str] | None = None) -> "RollingWindowOperator":
         g, rots = self.selected(geom)
-        op = RollingWindowOperator(g, self.nx, self.B, self.fov, self.dz_slice, devices, self.cache, self.n_win)
+        op = RollingWindowOperator(g, self.nx, self.B, self.fov, self.dz_slice, devices, self.cache, self.n_win, self.z_center)
         op.rotations, op.spec = rots, self
         return op
 
     def to_dict(self) -> dict:
         return dict(geometry_id=self.geometry_id, nx=self.nx, B=self.B, dz_slice=self.dz_slice, fov=self.fov, n_win=self.n_win,
-                    rotations=self.rotations, cache=self.cache)
+                    rotations=self.rotations, cache=self.cache, z_center=self.z_center)
 
     @classmethod
     def from_dict(cls, d: dict) -> "ProjectorSpec":
-        return cls(**{k: d[k] for k in ("geometry_id", "nx", "B", "dz_slice", "fov", "n_win", "rotations", "cache") if k in d})
+        return cls(**{k: d[k] for k in ("geometry_id", "nx", "B", "dz_slice", "fov", "n_win", "rotations", "cache", "z_center") if k in d})
 
 
 # ------------------------------------------------------------------ operator
@@ -136,7 +137,8 @@ class RollingWindowOperator:
     detector bin ``B``, built on ``devices`` (default: all visible GPUs)."""
 
     def __init__(self, geom: StepAndShootGeometry, nx: int, B: int, fov: float = 512.0,
-                 dz_slice: float = 2.0, devices: list[str] | None = None, cache: str = "column", n_win: int | None = None):
+                 dz_slice: float = 2.0, devices: list[str] | None = None, cache: str = "column", n_win: int | None = None,
+                 z_center: float | None = None):
         """n_win: force the window height (slices); default = what the cone covers.  Rotation j is shifted by
         geom.dz_rot which must be a whole number of slices (dz_rot / dz_slice); use :func: first
         if the scan's step is finer than the slice."""
@@ -148,8 +150,9 @@ class RollingWindowOperator:
         self.dev = torch.device(self.devices[0])
         vox = fov / nx
         zmin, zmax = geom.ray_z_span(B, fov / 2 * math.sqrt(2))   # rays through the square volume's corners
-        if n_win:                                   # forced window: centred on the cone's z extent
-            z0 = dz_slice * round((zmin + zmax) / 2 / dz_slice) - dz_slice * (n_win // 2)
+        if n_win:                                   # forced window: centred on z_center (default: the cone's z extent)
+            zc = (zmin + zmax) / 2 if z_center is None else z_center
+            z0 = dz_slice * round(zc / dz_slice) - dz_slice * (n_win // 2)
             self.n_win = n_win
         else:
             z0 = dz_slice * (math.floor(zmin / dz_slice) - 1)

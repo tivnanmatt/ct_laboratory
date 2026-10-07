@@ -10,15 +10,27 @@ With a_g = s_g / I_0 and a_ph = s_ph / I_0 (fractions of the MEASURED air signal
 
     t_j = (1 - a_g,j) T_j + a_ph,j
 
-where T_j is the scatter-free transmission (primary + off-focal).  The fields are parameterized on bins of B x B detector
-pixels (B = 8 -> 8 x 8 mm on the 1 mm pitch), flat over each bin: a 32 x 32 module has 4 x 4 = 16 scatter points per field.
-Parameters per source: a_g [n_bins] and a_ph [n_phantom_fields, n_bins] (e.g. one phantom field per station, or one shared
-by stations that see the same object), with Gaussian priors (gain 4 % +- 3 %, phantom 4 % +- 5 % by default) and an optional
-smoothness penalty  lambda * sum over neighbouring bins (a_b - a_b')^2  (neighbours within a module and across adjacent
-modules along the arc).
+where T_j is the scatter-free transmission (primary + off-focal).  The phantom field is parameterized on bins of B x B detector
+pixels (B = 8 -> 8 x 8 mm on the 1 mm pitch), flat over each bin: a 32 x 32 module has 4 x 4 = 16 scatter points.
 
-Identifiability: in air (T = 1) only a_ph - a_g is determined; the split comes from the variation of T inside a bin and
-across stations, plus the priors.  Use ``smoothness`` > 0 when a bin has few valid pixels.
+Gain-scan field (``gain_flat``):
+    True   one flat level a_g per source (room scatter: there is no object in the gain scan, so it cannot have object structure)
+    False  one value per bin, like the phantom field
+Phantom-scan field (``phantom_relative_to_gain``):
+    True   a_ph,b = a_g + delta_b,  delta_b ~ N(0, phantom_sd^2): the room-scatter level is the prior for the phantom scatter and
+           the bins model the object-dependent change (object scatter minus shadowed room scatter)
+    False  a_ph,b ~ N(phantom, phantom_sd^2) independently of a_g
+Smoothness:
+    neighbour penalty   lambda * sum over neighbouring bins (a_b - a_b')^2  (smoothness, pairs)
+    Laplacian penalty   lambda_g ||Delta a_g||^2 + lambda_ph ||Delta a_ph||^2  on the bin GRID (grid [n_bin_rows, n_bin_cols] of bin
+                        indices in detector order, e.g. bin_grid(...)); Delta = 3 x 3 Laplacian kernel, reflection-padded convolution, so a
+                        constant or linear field costs nothing.  Use a very high lambda_g (gain scan: room scatter only, very low frequency)
+                        and a lower lambda_ph (phantom scan: as smooth as the data allow).
+    With phantom_relative_to_gain the phantom penalty acts on delta = a_ph - a_g.
+
+Identifiability: in air (T = 1) only a_ph - a_g is determined; the split comes from the variation of T inside a bin and across
+stations, plus the priors.  The fields are signal fractions at normal incidence; with a ScatterSpectrum the per-pixel value is
+multiplied by the detection ratio of the scatter spectrum relative to the primary (see AirNormalizedProjectionModel).
 """
 import torch
 
@@ -50,33 +62,74 @@ def neighbour_pairs(n_modules, bins_cols=4, bins_rows=4, module_order=None):
 
 class BinnedAdditiveScatter(torch.nn.Module):
     def __init__(self, bin_index, n_bins, n_phantom_fields=1, gain=0.04, gain_sd=0.03, phantom=0.04, phantom_sd=0.05,
-                 smoothness=0.0, pairs=None):
+                 smoothness=0.0, pairs=None, gain_flat=False, phantom_relative_to_gain=False, grid=None, laplacian_gain=0.0, laplacian_phantom=0.0):
         """bin_index [...] (pixel -> bin, e.g. module_bin_index); smoothness = lambda of the neighbour penalty"""
         super().__init__()
         self.register_buffer('bin_index', torch.as_tensor(bin_index, dtype=torch.long))
         self.register_buffer('pairs', pairs if pairs is not None else torch.zeros(0, 2, dtype=torch.long))
         self.n_bins, self.smoothness = n_bins, smoothness
+        self.gain_flat, self.relative = gain_flat, phantom_relative_to_gain
+        self.register_buffer('grid', torch.as_tensor(grid, dtype=torch.long) if grid is not None else torch.zeros(0, 0, dtype=torch.long))
+        self.laplacian_gain, self.laplacian_phantom = laplacian_gain, laplacian_phantom
         p = PriorParameters()
-        p.add('gain', gain, gain_sd, shape=(n_bins,), label='gain-scan scatter (% of air)', display=lambda v: 100 * v)
-        p.add('phantom', phantom, phantom_sd, shape=(n_phantom_fields, n_bins), label='phantom-scan scatter (% of air)', display=lambda v: 100 * v)
+        p.add('gain', gain, gain_sd, shape=() if gain_flat else (n_bins,),
+              label='gain-scan scatter, flat (% of air)' if gain_flat else 'gain-scan scatter (% of air)', display=lambda v: 100 * v)
+        if phantom_relative_to_gain:
+            p.add('phantom', 0.0, phantom_sd, shape=(n_phantom_fields, n_bins), label='phantom − gain scatter (% of air)', display=lambda v: 100 * v)
+        else:
+            p.add('phantom', phantom, phantom_sd, shape=(n_phantom_fields, n_bins), label='phantom-scan scatter (% of air)', display=lambda v: 100 * v)
         self.params = p
+
+    def gain_bins(self):
+        g = self.params['gain']
+        return g.expand(self.n_bins) if self.gain_flat else g
+
+    def phantom_bins(self, field=0):
+        ph = self.params['phantom'][field]
+        return self.gain_bins() + ph if self.relative else ph
 
     def gain_field(self):
         """a_g per pixel [...]"""
-        return self.params['gain'][self.bin_index]
+        return self.gain_bins()[self.bin_index]
 
     def phantom_field(self, field=0):
         """a_ph per pixel [...]"""
-        return self.params['phantom'][field][self.bin_index]
+        return self.phantom_bins(field)[self.bin_index]
 
     def forward(self, T, field=0):
         """t = (1 - a_g) T + a_ph"""
         return (1 - self.gain_field()) * T + self.phantom_field(field)
 
+    def laplacian(self, values):
+        """Laplacian of per-bin values [..., n_bins] on the bin grid (reflection padding): [..., n_bin_rows, n_bin_cols]"""
+        img = values[..., self.grid]
+        sh = img.shape; x = img.reshape(-1, 1, sh[-2], sh[-1])
+        x = torch.nn.functional.pad(x, (1, 1, 1, 1), mode='reflect')
+        k = torch.tensor([[0.0, 1.0, 0.0], [1.0, -4.0, 1.0], [0.0, 1.0, 0.0]], device=values.device, dtype=values.dtype)[None, None]
+        return torch.nn.functional.conv2d(x, k).reshape(sh)
+
     def penalty(self):
-        if self.smoothness <= 0 or len(self.pairs) == 0:
-            return 0.0
-        g = self.params['gain']; ph = self.params['phantom']
-        d = (g[self.pairs[:, 0]] - g[self.pairs[:, 1]]) ** 2
-        dp = (ph[:, self.pairs[:, 0]] - ph[:, self.pairs[:, 1]]) ** 2
-        return self.smoothness * (d.double().sum() + dp.double().sum())
+        tot = 0.0
+        i, j = self.pairs[:, 0], self.pairs[:, 1]
+        ph = self.params['phantom']
+        if self.smoothness > 0 and len(self.pairs) > 0:
+            tot = tot + self.smoothness * ((ph[:, i] - ph[:, j]) ** 2).double().sum()
+            if not self.gain_flat:
+                g = self.params['gain']; tot = tot + self.smoothness * ((g[i] - g[j]) ** 2).double().sum()
+        if self.grid.numel() > 0:
+            if self.laplacian_phantom > 0:
+                tot = tot + self.laplacian_phantom * (self.laplacian(ph) ** 2).double().sum()
+            if self.laplacian_gain > 0 and not self.gain_flat:
+                tot = tot + self.laplacian_gain * (self.laplacian(self.params['gain']) ** 2).double().sum()
+        return tot
+
+
+def bin_grid(bin_index, arc_position, bins_rows=4, bin_row_index=None):
+    """[bins_rows, n_bins / bins_rows] grid of bin indices in detector order: rows = bin row, columns sorted by the mean arc
+    position of each bin's pixels.  bin_index, arc_position [...] per pixel; bin_row_index [...] per pixel (row // bin_px)."""
+    bi = bin_index.flatten(); ap = arc_position.flatten().float(); br = bin_row_index.flatten()
+    n = int(bi.max()) + 1
+    pos = torch.zeros(n, device=bi.device).index_add_(0, bi, ap) / torch.bincount(bi, minlength=n).clamp(min=1)
+    row = torch.zeros(n, dtype=torch.long, device=bi.device); row[bi] = br
+    rows = [torch.nonzero(row == r)[:, 0] for r in range(bins_rows)]
+    return torch.stack([b[torch.argsort(pos[b])] for b in rows])

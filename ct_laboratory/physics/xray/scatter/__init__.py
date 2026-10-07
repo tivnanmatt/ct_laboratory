@@ -4,4 +4,5 @@ from .kernels import gaussian_matrix, blur_air_padded
 from .off_focal import OffFocalRadiation, FocalSpotBlur
 from .room_scatter import RoomScatter
 from .object_scatter import CentroidKleinNishinaScatter, geometry_factors, klein_nishina, WATER_ELECTRONS_PER_MM3
-from .binned_scatter import BinnedAdditiveScatter, module_bin_index, neighbour_pairs
+from .binned_scatter import BinnedAdditiveScatter, module_bin_index, neighbour_pairs, bin_grid
+from .scatter_spectrum import ScatterSpectrum

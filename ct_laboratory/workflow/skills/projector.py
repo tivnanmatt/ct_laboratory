@@ -21,7 +21,7 @@ def load_projector(session, ref="@projector"):
 @skill("projector.build")
 def projector_build(cfg, session, job):
     """cfg: {geometry: '@geometry', nx: 64, B: 8 (default 512//nx), dz: 2.0, fov: 512, n_win: null,
-             rotations: null | [i, j, ...] | {every: 4} | {every: 4, start: 0}, role: 'projector@64'}
+             rotations: null | [i, j, ...] | {every: 4} | {every: 4, start: 0}, z_center: null (mm, centre of a forced window), role: 'projector@64'}
     Builds the operator once here to validate it and record its size; the asset is the spec."""
     gid = session.resolve(cfg.get("geometry", "@geometry"))
     geom = StepAndShootGeometry.load(session.store.get(gid).file("geometry.pt"))
@@ -29,7 +29,7 @@ def projector_build(cfg, session, job):
     if isinstance(rots, dict):
         rots = list(range(int(rots.get("start", 0)), geom.n_rot, int(rots["every"])))
     spec = ProjectorSpec(geometry_id=gid, nx=nx, B=int(cfg.get("B", 512 // nx)), dz_slice=float(cfg.get("dz", 2.0)), fov=float(cfg.get("fov", 512.0)),
-                         n_win=cfg.get("n_win"), rotations=rots, cache=cfg.get("cache", "column"))
+                         n_win=cfg.get("n_win"), rotations=rots, cache=cfg.get("cache", "column"), z_center=cfg.get("z_center"))
     store = session.store; role = cfg.get("role", f"projector@{nx}")
     params = dict(spec.to_dict(), code=code_params())
     a = store.lookup_recipe("projector", "projector.build", SKILL_VERSION, {"geometry": gid}, params)
