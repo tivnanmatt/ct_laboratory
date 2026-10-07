@@ -16,6 +16,10 @@
 #   physics.xray        spectral X-ray measurement physics (line-integral
 #                       domain only; no projector dependencies)
 #   physics.ct_system   tomography.projector + physics.xray_system
+#   workflow            generic bookkeeping for studies: content-addressed assets,
+#                       sessions, recorded jobs, GPU discovery, ssh/rsync remote sync
+#   reconstruction      complete algorithms on tomography + sparse_eigen_preconditioner
+#                       (rolling-window multi-rotation PCG cascade)
 # ---------------------------------------------------------------------------
 from . import tomography
 from . import optimization
@@ -23,6 +27,8 @@ from . import random_variable
 from . import sparse_eigen_preconditioner
 from . import bayesian_estimation
 from . import physics
+from . import workflow
+from . import reconstruction
 
 # ---------------------------------------------------------------------------
 # Backward-compatible flat namespace (legacy imports keep working).

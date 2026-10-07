@@ -1,0 +1,63 @@
+"""Client <-> server transport over ssh + rsync.
+
+The server is just another machine with an :class:`AssetStore` at some root.  Because asset
+ids are content/recipe hashes, syncing is "send the asset directories the other side does
+not have" - no job bookkeeping crosses the wire except the one job config.
+"""
+from __future__ import annotations
+
+import os
+import shlex
+import subprocess
+import time
+
+__all__ = ["RemoteStore"]
+
+
+class RemoteStore:
+    def __init__(self, host: str, root: str, ssh_opts: tuple[str, ...] = ()):
+        """``host`` is an ssh alias or ``user@ip``; ``root`` the server's asset-store root."""
+        self.host, self.root = host, root.rstrip("/")
+        self.ssh = ["ssh", *ssh_opts, host]
+
+    def run(self, cmd: str, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
+        return subprocess.run([*self.ssh, cmd], check=check, text=True, capture_output=capture)
+
+    def has(self, asset_ids: list[str]) -> dict[str, bool]:
+        q = " ".join(shlex.quote(a) for a in asset_ids)
+        r = self.run(f'for a in {q}; do t=${{a%-*}}; [ -f {shlex.quote(self.root)}/$t/$a/asset.yaml ] && echo "$a 1" || echo "$a 0"; done',
+                     capture=True)
+        return {l.split()[0]: l.split()[1] == "1" for l in r.stdout.splitlines() if l.strip()}
+
+    def _rsync(self, src: str, dst: str) -> float:
+        t = time.time()
+        subprocess.run(["rsync", "-rt", "--partial", "-e", " ".join(shlex.quote(x) for x in self.ssh[:-1]), src, dst], check=True)
+        return time.time() - t
+
+    def push(self, store, asset_ids: list[str]) -> dict[str, float]:
+        """Copy the listed assets to the server unless already there. Returns seconds per asset pushed."""
+        have = self.has(asset_ids)
+        out = {}
+        for aid in asset_ids:
+            if have.get(aid):
+                continue
+            a = store.get(aid)
+            self.run(f"mkdir -p {shlex.quote(self.root)}/{a.type}/.incoming")
+            tmp = f"{self.root}/{a.type}/.incoming/{aid}"
+            out[aid] = self._rsync(a.path + "/", f"{self.host}:{tmp}/")
+            self.run(f"mv {shlex.quote(tmp)} {shlex.quote(self.root)}/{a.type}/{aid}")   # atomic: appears only when complete
+        return out
+
+    def pull(self, store, asset_ids: list[str]) -> dict[str, float]:
+        """Copy the listed assets from the server into the local store unless already there."""
+        out = {}
+        for aid in asset_ids:
+            if store.exists(aid):
+                continue
+            type_ = aid.rsplit("-", 1)[0]
+            stage = store.stage_dir(type_)
+            out[aid] = self._rsync(f"{self.host}:{self.root}/{type_}/{aid}/", stage + "/")
+            final = store.path_of(aid)
+            os.makedirs(os.path.dirname(final), exist_ok=True)
+            os.replace(stage, final)
+        return out
