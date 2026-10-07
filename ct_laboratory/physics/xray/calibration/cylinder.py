@@ -210,8 +210,8 @@ class CylinderCalibration:
         def wmean(m_):
             if m_.sum() < 20: return float("nan"), float("nan")
             ww = w[m_]; mm = (ww * dL[m_]).sum() / ww.sum(); return float(mm), float(np.sqrt((ww ** 2 * (dL[m_] - mm) ** 2).sum()) / ww.sum())
-        edges = np.arange(0, 104, 4.0); prof = [wmean((bb >= a) & (bb < c)) for a, c in zip(edges[:-1], edges[1:])]
-        cen, ring = wmean(bb < 10), wmean((bb >= 25) & (bb < 45))
+        Rg = float(geo[0]); edges = np.linspace(0, 1.04 * Rg, 27); prof = [wmean((bb >= a) & (bb < c)) for a, c in zip(edges[:-1], edges[1:])]
+        cen, ring = wmean(bb < 0.1 * Rg), wmean((bb >= 0.25 * Rg) & (bb < 0.45 * Rg))     # centre vs reference ring, as fractions of the radius (ACR: 10 / 25-45 mm)
         nz = dL / np.maximum(sdL[g_].cpu().numpy(), 1e-3)
         w0 = p["w"][p["mask"].any(0)].mean(0); w0 = w0 / w0.sum()
         return dict(params=self.summary(), geo=[float(v) for v in geo], losses=self.losses, snaps=self.snaps,

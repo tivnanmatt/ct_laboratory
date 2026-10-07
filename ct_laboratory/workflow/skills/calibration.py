@@ -30,9 +30,12 @@ from . import SKILL_VERSION, code_params, skill
 
 
 def _mu(material, keV):
+    """linear attenuation (1/mm): 'water' (xraydb name), {formula, density}, or {components: [{name|formula, density}, ...]} (mixture by partial densities, g/cc)"""
     import xraydb
     if isinstance(material, str):
         return xraydb.material_mu(material, keV) / 10
+    if "components" in material:
+        return sum(_mu(c["name"], keV) * c["density"] / xraydb.find_material(c["name"]).density if "name" in c else _mu(c, keV) for c in material["components"])
     d = xraydb.chemparse(material["formula"]); tot = sum(n * xraydb.atomic_mass(e) for e, n in d.items())
     return material["density"] * sum(n * xraydb.atomic_mass(e) / tot * xraydb.mu_elam(e, keV) for e, n in d.items()) / 10
 
@@ -83,8 +86,10 @@ def calibration_cylinder(cfg, session, job):
     iu = torch.arange(nu, device=dev) - (nu - 1) / 2; iv = torch.arange(nv, device=dev) - (nv - 1) / 2
     NSUB = int(cfg.get("sub_rays", 3)); osub = (torch.arange(NSUB, device=dev) + 0.5) / NSUB - 0.5
     # object z per model rotation r: the volume slab origin z0 = dz_rot * (floor(zmin / dz_rot) - 1) with zmin the cone's z extent (rolling-window convention)
-    zmin, _ = geom.ray_z_span(1, float(cfg.get("fov_radius_mm", 256.0)))
-    z0 = float(cfg.get("z0_mm", geom.dz_rot * (math.floor(zmin / geom.dz_rot) - 1)))
+    if "z0_mm" in cfg or geom.dz_rot == 0:
+        z0 = float(cfg.get("z0_mm", 0.0))
+    else:
+        zmin, _ = geom.ray_z_span(1, float(cfg.get("fov_radius_mm", 256.0))); z0 = geom.dz_rot * (math.floor(zmin / geom.dz_rot) - 1)
     print(f"object z origin {z0:.1f} mm (rotation {rots[0]} -> slab offset {rots[0] * geom.dz_rot - z0:.1f} mm); phantom z slab {phantom.z_slab}")
     # layouts come in unique-source-key order; the raw asset's source_ids are in FIRING order (ascending ray offset) -> map by first ray offset
     by_off = sorted(range(len(layouts)), key=lambda i: layouts[i].ray_slices[0][0])
