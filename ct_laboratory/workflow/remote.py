@@ -18,7 +18,8 @@ class RemoteStore:
     def __init__(self, host: str, root: str, ssh_opts: tuple[str, ...] = ()):
         """``host`` is an ssh alias or ``user@ip``; ``root`` the server's asset-store root."""
         self.host, self.root = host, root.rstrip("/")
-        self.ssh = ["ssh", *ssh_opts, host]
+        extra = tuple(os.environ.get("SCT_SSH_OPTS", "").split())   # e.g. "-F /dev_ws/.ssh/config" inside a container
+        self.ssh = ["ssh", *extra, *ssh_opts, host]
 
     def run(self, cmd: str, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
         return subprocess.run([*self.ssh, cmd], check=check, text=True, capture_output=capture)
