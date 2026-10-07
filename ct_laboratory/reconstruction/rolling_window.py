@@ -153,7 +153,7 @@ def bin_sinogram(y: torch.Tensor, w: torch.Tensor, n_view: int, n_u: int, n_v: i
     """Bin ``[R, n_view*n_u*n_v]`` sinograms (view, col, row order) by ``B`` x ``B``:
     weighted mean of valid pixels; binned weight = mean of the weights."""
     if B == 1:
-        return y, w
+        return y, w.float()
     R = y.shape[0]
     y4 = y.view(R, n_view, n_u, n_v); w4 = w.view(R, n_view, n_u, n_v).float()
     ys = F.avg_pool2d((y4 * w4).view(R * n_view, 1, n_u, n_v), B).view(R, n_view, n_u // B, n_v // B)
