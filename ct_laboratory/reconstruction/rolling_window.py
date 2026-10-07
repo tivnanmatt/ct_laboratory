@@ -25,7 +25,7 @@ from ..tomography import VoxelProjector3D, split_voxel_projector
 from ..tomography.voxel_projector_3d_module import make_views
 from ..workflow.gpus import available_devices
 
-__all__ = ["StepAndShootGeometry", "RollingWindowOperator", "bin_sinogram", "window_eigen",
+__all__ = ["StepAndShootGeometry", "ProjectorSpec", "decimate", "RollingWindowOperator", "bin_sinogram", "window_eigen",
            "lambda_max", "quadratic_penalty_grad", "pcg", "upsample_inplane", "cascade"]
 
 
@@ -81,21 +81,76 @@ class StepAndShootGeometry:
         return cls(**torch.load(path, map_location="cpu", weights_only=False))
 
 
+def decimate(geom: StepAndShootGeometry, every: int) -> StepAndShootGeometry:
+    """Keep every every-th rotation (step becomes every * dz_rot).  Apply the same selection to the sinogram rows."""
+    n = (geom.n_rot - 1) // every + 1
+    return StepAndShootGeometry(S=geom.S, C=geom.C, U=geom.U, V=geom.V, pitch_u=geom.pitch_u, pitch_v=geom.pitch_v, n_u=geom.n_u, n_v=geom.n_v,
+                                n_rot=n, dz_rot=geom.dz_rot * every, z_mid=geom.z_mid, meta=dict(geom.meta, decimated_every=every))
+
+
+@dataclass
+class ProjectorSpec:
+    """Everything that defines one projector of a scan, independent of the machine it runs on:
+    the geometry (by asset id), the grid, the detector binning, the window height and which
+    rotations are used.  Scan-specific choices live here, not in the reconstruction interface."""
+    geometry_id: str
+    nx: int
+    B: int
+    dz_slice: float = 2.0
+    fov: float = 512.0
+    n_win: int | None = None                 # None: what the cone covers
+    rotations: list[int] | None = None       # model rotation indices used (None: all); must be equally spaced
+    cache: str = "column"
+
+    def selected(self, geom: StepAndShootGeometry) -> tuple[StepAndShootGeometry, list[int]]:
+        """(geometry restricted to the selected rotations, their indices into the sinogram rows)"""
+        rots = list(range(geom.n_rot)) if self.rotations is None else list(self.rotations)
+        if len(rots) > 1:
+            steps = {rots[i + 1] - rots[i] for i in range(len(rots) - 1)}
+            assert len(steps) == 1, f"rotations must be equally spaced, got steps {steps}"
+            g = StepAndShootGeometry(S=geom.S, C=geom.C, U=geom.U, V=geom.V, pitch_u=geom.pitch_u, pitch_v=geom.pitch_v, n_u=geom.n_u, n_v=geom.n_v,
+                                     n_rot=len(rots), dz_rot=geom.dz_rot * steps.pop(), z_mid=geom.z_mid, meta=dict(geom.meta, rotations=rots))
+        else:
+            g = StepAndShootGeometry(S=geom.S, C=geom.C, U=geom.U, V=geom.V, pitch_u=geom.pitch_u, pitch_v=geom.pitch_v, n_u=geom.n_u, n_v=geom.n_v,
+                                     n_rot=1, dz_rot=0.0, z_mid=geom.z_mid, meta=dict(geom.meta, rotations=rots))
+        return g, rots
+
+    def build(self, geom: StepAndShootGeometry, devices: list[str] | None = None) -> "RollingWindowOperator":
+        g, rots = self.selected(geom)
+        op = RollingWindowOperator(g, self.nx, self.B, self.fov, self.dz_slice, devices, self.cache, self.n_win)
+        op.rotations, op.spec = rots, self
+        return op
+
+    def to_dict(self) -> dict:
+        return dict(geometry_id=self.geometry_id, nx=self.nx, B=self.B, dz_slice=self.dz_slice, fov=self.fov, n_win=self.n_win,
+                    rotations=self.rotations, cache=self.cache)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ProjectorSpec":
+        return cls(**{k: d[k] for k in ("geometry_id", "nx", "B", "dz_slice", "fov", "n_win", "rotations", "cache") if k in d})
+
+
 # ------------------------------------------------------------------ operator
 class RollingWindowOperator:
     """Projector for the whole multi-rotation volume at grid ``nx`` x ``nx`` x ``n_tot``,
     detector bin ``B``, built on ``devices`` (default: all visible GPUs)."""
 
     def __init__(self, geom: StepAndShootGeometry, nx: int, B: int, fov: float = 512.0,
-                 dz_slice: float = 2.0, devices: list[str] | None = None, cache: str = "column"):
+                 dz_slice: float = 2.0, devices: list[str] | None = None, cache: str = "column", n_win: int | None = None):
+        """n_win: force the window height (slices); default = what the cone covers.  Rotation j is shifted by
+        geom.dz_rot which must be a whole number of slices (dz_rot / dz_slice); use :func: first
+        if the scan's step is finer than the slice."""
         self.geom, self.nx, self.B, self.fov, self.dz = geom, nx, B, fov, dz_slice
+        step = geom.dz_rot / dz_slice if geom.n_rot > 1 else 1.0
+        assert abs(step - round(step)) < 1e-6 and round(step) >= 1, f"rotation step {geom.dz_rot} mm must be a multiple of the slice {dz_slice} mm"
+        self.step = int(round(step))
         self.devices = devices or available_devices()
         self.dev = torch.device(self.devices[0])
         vox = fov / nx
         zmin, zmax = geom.ray_z_span(B, fov / 2 * math.sqrt(2))   # rays through the square volume's corners
         z0 = dz_slice * (math.floor(zmin / dz_slice) - 1)
-        self.n_win = int(math.ceil((zmax - z0) / dz_slice)) + 2
-        self.n_tot = self.n_win + geom.n_rot - 1
+        self.n_win = n_win or (int(math.ceil((zmax - z0) / dz_slice)) + 2)
+        self.n_tot = self.n_win + (geom.n_rot - 1) * self.step
         self.R = geom.n_rot
         self.vox, self.z0 = vox, z0
         views = geom.views(B, self.dev)
@@ -118,20 +173,20 @@ class RollingWindowOperator:
 
     # rolling application over rotations: rotation j sees slices [j, j+n_win)
     def fwd(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.stack([self.A.forward_project(x[..., j:j + self.n_win].contiguous()) for j in range(self.R)])
+        return torch.stack([self.A.forward_project(x[..., j * self.step:j * self.step + self.n_win].contiguous()) for j in range(self.R)])
 
     def adj(self, y: torch.Tensor) -> torch.Tensor:
         out = torch.zeros(self.shape, device=self.dev)
         for j in range(self.R):
-            out[..., j:j + self.n_win] += self.A.back_project(y[j]).reshape(self.wshape)
+            out[..., j * self.step:j * self.step + self.n_win] += self.A.back_project(y[j]).reshape(self.wshape)
         return out
 
     def normal(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
         """A^T diag(w) A x, streamed per rotation (no [R, n_ray] intermediate)."""
         out = torch.zeros(self.shape, device=self.dev)
         for j in range(self.R):
-            t = self.A.forward_project(x[..., j:j + self.n_win].contiguous()); t.mul_(w[j])
-            out[..., j:j + self.n_win] += self.A.back_project(t).reshape(self.wshape)
+            t = self.A.forward_project(x[..., j * self.step:j * self.step + self.n_win].contiguous()); t.mul_(w[j])
+            out[..., j * self.step:j * self.step + self.n_win] += self.A.back_project(t).reshape(self.wshape)
         return out
 
     def window_gram(self, w_mean: torch.Tensor | None = None):
@@ -238,25 +293,26 @@ def upsample_inplane(x: torch.Tensor, nx_from: int, nx_to: int) -> torch.Tensor:
     return F.grid_sample(vol, grid, mode="bilinear", padding_mode="border", align_corners=True)[0, 0].permute(2, 1, 0).contiguous()
 
 
-def cascade(geom: StepAndShootGeometry, y1: torch.Tensor, w1: torch.Tensor, levels: list[dict],
-            eigen_provider, fov: float = 512.0, dz_slice: float = 2.0, devices: list[str] | None = None,
-            log=print) -> tuple[list[tuple[int, torch.Tensor]], list[dict]]:
-    """Multi-resolution cascade.  ``levels`` = ``[{nx, B, iters, k, beta_scale}, ...]`` coarse to fine;
-    ``y1``/``w1`` are the bin-1 sinograms (binned here per level);
-    ``eigen_provider(op, k, w_mean) -> SparseEigenDecomposition`` (so callers can cache bases).
+def cascade(y1: torch.Tensor, w1: torch.Tensor, levels: list[dict], eigen_provider, log=print) -> tuple[list[tuple[int, torch.Tensor]], list[dict]]:
+    """Multi-resolution cascade.  levels = [{op: RollingWindowOperator, iters, k, beta_scale}, ...] coarse to
+    fine (each op built from a projector asset; all must select the same rotations); y1/w1 are the bin-1
+    sinogram rows of those rotations.  eigen_provider(op, k, w_mean) -> SparseEigenDecomposition.
     Returns the volume of every level and per-level metrics."""
     vols, metrics, x = [], [], None
     for lv in levels:
-        nx, B, iters, k = lv["nx"], lv["B"], lv["iters"], lv["k"]
+        op, iters, k = lv["op"], lv["iters"], lv["k"]
+        nx, B, geom = op.nx, op.B, op.geom
         t_level = time.time()
-        op = RollingWindowOperator(geom, nx, B, fov, dz_slice, devices)
         y, w = bin_sinogram(y1.to(op.dev), w1.to(op.dev), geom.n_view, geom.n_u, geom.n_v, B)
         log(f"[{nx}] {op.describe()}")
         t = time.time(); dec = eigen_provider(op, k, w.mean(0)); t_eig = time.time() - t
         lam = dec.eigenvalues
         t = time.time(); lam_full = lambda_max(op, w); t_lam = time.time() - t
         beta = lv.get("beta_scale", 1.0) * lam_full / 1200.0
-        x0 = None if x is None else upsample_inplane(x.to(op.dev), prev_nx, nx)
+        x0 = None
+        if x is not None:
+            assert x.shape[2] == op.n_tot, f"cascade levels must share the slice grid ({x.shape[2]} vs {op.n_tot})"
+            x0 = upsample_inplane(x.to(op.dev), prev_nx, nx)
         xs, conv = pcg(op, y, w, beta, iters, make_window_preconditioner(op, dec), x0, log=log)
         m = dict(nx=nx, B=B, k=k, iters=iters, beta=beta, lam_max=lam_full, eig_cond=float(lam.max() / lam.min()),
                  t_build_s=op.t_build, t_eig_s=round(t_eig, 2), t_lam_s=round(t_lam, 2), t_pcg_s=conv["t_pcg_s"],
@@ -265,5 +321,5 @@ def cascade(geom: StepAndShootGeometry, y1: torch.Tensor, w1: torch.Tensor, leve
                  history=conv["history"])
         log(f"[{nx}] eig {t_eig:.1f} s (cond {m['eig_cond']:.2f}), lam_max {t_lam:.1f} s, PCG {iters} it {conv['t_pcg_s']} s, level {m['t_level_s']} s")
         vols.append((nx, xs.cpu())); metrics.append(m); x, prev_nx = xs, nx
-        del op, dec; torch.cuda.empty_cache()
+        del dec; torch.cuda.empty_cache()
     return vols, metrics

@@ -9,7 +9,8 @@ import torch
 from ...physics.xray.correction import WaterBeamHardeningLUT, frame_layouts_from_views, linearize_sinogram
 from ..gpus import available_devices
 from . import SKILL_VERSION, code_params, skill
-from .eigen import load_geometry, load_sinogram
+from .eigen import load_sinogram
+from .projector import load_projector
 
 
 @skill("correction.linearize")
@@ -18,7 +19,8 @@ def correction_linearize(cfg, session, job):
              spectrum: {kvp: 120, al_mm: 3.0, w_mm: 0.02}, off_focal: {fraction: 0.129, halo_sd_mm: 61.0, focal_fwhm_mm: 1.0},
              pedestal: 0.0, n_sweeps: 6, units: '1/mm', chunk_rotations: 8}
     Output: a new sinogram asset (same layout) with beam-hardening + off-focal + pedestal corrected line integrals and weights."""
-    geom, gid = load_geometry(session, cfg.get("geometry", "@geometry"))
+    from ...reconstruction import StepAndShootGeometry
+    gid = session.resolve(cfg.get("geometry", "@geometry")); geom = StepAndShootGeometry.load(session.store.get(gid).file("geometry.pt"))
     d, sid = load_sinogram(session, cfg.get("sinogram", "@sinogram"))
     sp, of = dict(kvp=120.0, al_mm=3.0, w_mm=0.02), dict(fraction=0.129, halo_sd_mm=61.0, focal_fwhm_mm=1.0)
     sp.update(cfg.get("spectrum") or {}); of.update(cfg.get("off_focal") or {})
