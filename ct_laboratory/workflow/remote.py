@@ -21,8 +21,18 @@ class RemoteStore:
         extra = tuple(os.environ.get("SCT_SSH_OPTS", "").split())   # e.g. "-F /dev_ws/.ssh/config" inside a container
         self.ssh = ["ssh", *extra, *ssh_opts, host]
 
+    RETRIES, BACKOFF_S = 4, 10
+
     def run(self, cmd: str, check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
-        return subprocess.run([*self.ssh, cmd], check=check, text=True, capture_output=capture)
+        """ssh and run cmd; an ssh-level failure (rc 255: dropped connection) is retried with backoff."""
+        for attempt in range(self.RETRIES):
+            r = subprocess.run([*self.ssh, cmd], text=True, capture_output=capture)
+            if r.returncode != 255:
+                break
+            time.sleep(self.BACKOFF_S * (attempt + 1))
+        if check and r.returncode != 0:
+            raise subprocess.CalledProcessError(r.returncode, r.args, r.stdout, r.stderr)
+        return r
 
     def has(self, asset_ids: list[str]) -> dict[str, bool]:
         q = " ".join(shlex.quote(a) for a in asset_ids)
@@ -31,9 +41,16 @@ class RemoteStore:
         return {l.split()[0]: l.split()[1] == "1" for l in r.stdout.splitlines() if l.strip()}
 
     def _rsync(self, src: str, dst: str) -> float:
+        """resumable rsync (--partial); a dropped connection (rc 255/12/30) is retried and resumes."""
         t = time.time()
-        subprocess.run(["rsync", "-rt", "--partial", "-e", " ".join(shlex.quote(x) for x in self.ssh[:-1]), src, dst], check=True)
-        return time.time() - t
+        for attempt in range(self.RETRIES):
+            r = subprocess.run(["rsync", "-rt", "--partial", "--timeout=120", "-e", " ".join(shlex.quote(x) for x in self.ssh[:-1]), src, dst])
+            if r.returncode == 0:
+                return time.time() - t
+            if r.returncode not in (255, 12, 30, 20):
+                break
+            time.sleep(self.BACKOFF_S * (attempt + 1))
+        raise subprocess.CalledProcessError(r.returncode, r.args)
 
     def push(self, store, asset_ids: list[str]) -> dict[str, float]:
         """Copy the listed assets to the server unless already there. Returns seconds per asset pushed."""

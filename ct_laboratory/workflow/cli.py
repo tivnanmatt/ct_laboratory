@@ -74,10 +74,10 @@ def cmd_run(a):
     code = a.remote_code
     ctlab = f"python -m ct_laboratory.workflow.cli --store {shlex.quote(a.remote_root)}"
     cmd = (f"cd {shlex.quote(code)} && mkdir -p {shlex.quote(rsess)} && "
-           f"{sct} session new {shlex.quote(rsess)} >/dev/null && "
-           f"{sct} session bind {shlex.quote(rsess)} {roles} >/dev/null && "
+           f"{ctlab} session new {shlex.quote(rsess)} >/dev/null && "
+           f"{ctlab} session bind {shlex.quote(rsess)} {roles} >/dev/null && "
            f"echo {rcfg} > /tmp/sct_job.yaml && "
-           f"{sct} run {shlex.quote(a.skill)} /tmp/sct_job.yaml -s {shlex.quote(rsess)} --json")
+           f"{ctlab} run {shlex.quote(a.skill)} /tmp/sct_job.yaml -s {shlex.quote(rsess)} --json")
     print(f"running {a.skill} on {a.remote} ...", flush=True)
     r = remote.run(cmd, check=False, capture=True)
     sys.stdout.write(r.stdout[-4000:] if len(r.stdout) > 4000 else r.stdout)
