@@ -8,6 +8,8 @@ setup(
     # include all areas (tomography, optimization, random_variable,
     # sparse_eigen_preconditioner, bayesian_estimation, physics.*)
     packages=find_packages(include=["ct_laboratory", "ct_laboratory.*"]),
+    package_data={"ct_laboratory.workflow": ["server_bootstrap.sh", "pod_check.py"]},
+    entry_points={"console_scripts": ["ctlab=ct_laboratory.workflow.cli:main"]},
     ext_modules=[
         CUDAExtension(
             name="ct_laboratory._C",
