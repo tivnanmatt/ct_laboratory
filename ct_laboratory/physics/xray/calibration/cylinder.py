@@ -173,7 +173,10 @@ class CylinderCalibration:
         opt = torch.optim.Adam([dict(params=pars, lr=c.lr), dict(params=[self.gz], lr=c.lr)]); sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, c.steps)
         every = snapshot_every or max(1, c.steps // 40)
         for step in range(1, c.steps + 1):
-            opt.zero_grad(); f, p = self.loss(); f.backward(); opt.step(); sch.step(); self.losses.append(float(f.detach()))
+            opt.zero_grad(); f, p = self.loss(); f = torch.nan_to_num(f, nan=1e30, posinf=1e30); f.backward()
+            for q in pars + [self.gz]:
+                if q.grad is not None: q.grad.nan_to_num_(0.0, 0.0, 0.0)
+            opt.step(); sch.step(); self.losses.append(float(f.detach()))
             if step == c.steps // 4:
                 with torch.no_grad():
                     _, p = self.forward(); o_ = (((self.D.t - p["m"]) / p["v"].sqrt()).abs() > c.outlier_z) & p["mask"]; self.mask_out &= ~o_

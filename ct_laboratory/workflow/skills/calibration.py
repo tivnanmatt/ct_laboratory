@@ -111,6 +111,7 @@ def calibration_cylinder(cfg, session, job):
         good = torch.stack([img((gat(raw["good"]) & (~gat(raw["glitch"][k]) if "glitch" in raw else True)).to(dev), False) for k in ks]) & (I0 > 100)[None] & (Y < 2 * I0[None] + 1000)
         ROW = img(ro_); good &= ~((ROW == 0) | (ROW == nv - 1))[None]; I0 = I0.clamp(min=1.0)
         t = torch.nan_to_num((Y - kap[None]) / I0[None], nan=0.0, posinf=0.0, neginf=0.0)
+        t = torch.where(good, t, torch.zeros_like(t)).clamp(-1.0, 3.0)                        # invalid samples (fp16 overflow, hot pixels) must not leak into the edge-gradient / variance terms
         extra = torch.stack([img(gat(raw["extra_L"][k]).float().to(dev)) for k in ks]) if "extra_L" in raw else None
         fr = None
         if "fluence" in raw:
