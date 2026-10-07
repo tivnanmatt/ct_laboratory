@@ -100,4 +100,32 @@ F, Dair = geometry_factors(source, point, pos, nrm, T(E), T(fine), T(xraydb.mate
 O = CentroidKleinNishinaScatter().to(dev)(src(), (F, Dair))
 check('one-point object scatter of a 30 mm water cylinder ~ 0.01-0.1 % of air, symmetric', 1e-4 < float(O.mean()) < 1e-3 and float((O - O.flip(0)).abs().max() / O.max()) < 1e-3,
       f"mean {100 * float(O.mean()):.3f} % of air")
+# 6 cylinder calibration on a synthetic firing: recover radius / density / scatter level from simulated data
+from ct_laboratory.physics.xray.calibration import CylinderPhantom, FiringData, CylinderCalibrationConfig, CylinderCalibration
+nmod, nsub = 4, 3; Rr, Cc = 32, nmod * 32
+srcp = T([-600.0, 0.0, 0.0]); ang = torch.linspace(-0.35, 0.35, Cc, device=dev)
+cen = torch.stack([400 * torch.cos(ang), 400 * torch.sin(ang), torch.zeros_like(ang)], -1)                     # detector arc centres
+nrm = -cen / cen.norm(dim=-1, keepdim=True); tang = torch.stack([-torch.sin(ang), torch.cos(ang), torch.zeros_like(ang)], -1)
+rowz = (torch.arange(Rr, device=dev) - 15.5) * 1.0
+pos = cen[None] + rowz[:, None, None] * T([0.0, 0.0, 1.0]); nrm2 = nrm[None].expand(Rr, Cc, 3)
+osub = (torch.arange(nsub, device=dev) + 0.5) / nsub - 0.5
+subp = pos[..., None, :] + osub[None, None, :, None] * 1.0 * tang[None, :, None, :]
+mod = torch.arange(nmod, device=dev)[:, None].expand(nmod, 32).reshape(-1)[None].expand(Rr, Cc); col = torch.arange(32, device=dev).repeat(nmod)[None].expand(Rr, Cc); row = torch.arange(Rr, device=dev)[:, None].expand(Rr, Cc)
+arc = 400 * (ang - ang[0]); NKs = 2
+truth = CylinderPhantom(radius=50.0, cx=5.0, cy=-3.0, mu=T(mu_w), density=1.03)
+cfgt = CylinderCalibrationConfig(energies_keV=E, spek_kvps=kvps, spek_phi=phi, mu_al=mu_al, mu_w=mu_W, mu_scint=csi(keV), kvp=120.0, al_mm=10.0, steps=400, lr=0.1, eps_sigma=0.0, scatter_spectrum=False, free_spectrum=False)
+I0s = torch.full((Rr, Cc), 2e4, device=dev); kap = torch.full((Rr, Cc), 30.0, device=dev)
+dummy = FiringData(t=torch.ones(NKs, Rr, Cc, device=dev), I0=I0s, kappa=kap, good=torch.ones(NKs, Rr, Cc, dtype=torch.bool, device=dev), det_pos=pos, det_normal=nrm2, src=srcp, sub_pos=subp,
+                   arc_mm=arc, row_mm=rowz, module=mod, col=col, row=row, z_offsets=torch.zeros(NKs, device=dev), magnification=0.74)
+sim = CylinderCalibration(cfgt, truth, dummy)
+with torch.no_grad():
+    sim.binned.params.set_value("gain", 0.03); _, p = sim.forward(); t_true = p["m"] / p["sc"]
+    y = torch.poisson(t_true * I0s + kap); t_obs = (y - kap) / I0s
+start = CylinderPhantom(radius=48.0, cx=4.0, cy=-2.0, mu=T(mu_w), density=1.0)
+data = FiringData(t=t_obs, I0=I0s, kappa=kap, good=torch.ones_like(t_obs, dtype=torch.bool), det_pos=pos, det_normal=nrm2, src=srcp, sub_pos=subp, arc_mm=arc, row_mm=rowz, module=mod, col=col, row=row,
+                  z_offsets=torch.zeros(NKs, device=dev), magnification=0.74)
+cal = CylinderCalibration(cfgt, start, data).fit(log=lambda *a: None); r = cal.result()
+# density and the flat scatter level are partly degenerate on one cylinder (rho 1.5 % low <-> a_g 0.2 % high); the density prior (sd 0.02) decides
+check('cylinder calibration recovers radius / scatter, density within its prior (synthetic)', abs(r['geo'][0] - 50.0) < 0.3 and abs(r['geo'][1] - 1.03) < 0.02 and abs(r['params']['gain-scan scatter (% of air)'][0] - 3.0) < 0.5 and abs(r['bump']) < 0.5,
+      f"R {r['geo'][0]:.2f} (50), rho {r['geo'][1]:.3f} (1.03), a_g {r['params']['gain-scan scatter (% of air)'][0]:.2f} % (3), bump {r['bump']:+.2f} mm")
 print('ALL PASS' if ok else 'SOME CHECKS FAILED')
