@@ -148,8 +148,12 @@ class RollingWindowOperator:
         self.dev = torch.device(self.devices[0])
         vox = fov / nx
         zmin, zmax = geom.ray_z_span(B, fov / 2 * math.sqrt(2))   # rays through the square volume's corners
-        z0 = dz_slice * (math.floor(zmin / dz_slice) - 1)
-        self.n_win = n_win or (int(math.ceil((zmax - z0) / dz_slice)) + 2)
+        if n_win:                                   # forced window: centred on the cone's z extent
+            z0 = dz_slice * round((zmin + zmax) / 2 / dz_slice) - dz_slice * (n_win // 2)
+            self.n_win = n_win
+        else:
+            z0 = dz_slice * (math.floor(zmin / dz_slice) - 1)
+            self.n_win = int(math.ceil((zmax - z0) / dz_slice)) + 2
         self.n_tot = self.n_win + (geom.n_rot - 1) * self.step
         self.R = geom.n_rot
         self.vox, self.z0 = vox, z0
