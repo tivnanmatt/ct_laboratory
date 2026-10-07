@@ -37,10 +37,22 @@ class RemoteStore:
             raise subprocess.CalledProcessError(r.returncode, r.args, r.stdout, r.stderr)
         return r
 
+    _HAS_PY = ("import os,sys,yaml\n"
+               "root=sys.argv[1]\n"
+               "for a in sys.argv[2:]:\n"
+               "    d=os.path.join(root,a.rsplit('-',1)[0],a); ok=0\n"
+               "    try:\n"
+               "        want=yaml.safe_load(open(os.path.join(d,'asset.yaml')))['size_bytes']\n"
+               "        got=sum(os.path.getsize(os.path.join(d,f)) for f in os.listdir(d) if f!='asset.yaml')\n"
+               "        ok=int(want==got)\n"
+               "    except Exception: pass\n"
+               "    print(a,ok)\n")
+
     def has(self, asset_ids: list[str]) -> dict[str, bool]:
-        q = " ".join(shlex.quote(a) for a in asset_ids)
-        r = self.run(f'for a in {q}; do t=${{a%-*}}; [ -f {shlex.quote(self.root)}/$t/$a/asset.yaml ] && echo "$a 1" || echo "$a 0"; done',
-                     capture=True)
+        """Which assets the server holds COMPLETELY: asset.yaml present and the data files' total size equal to
+        the size_bytes recorded in it (a partial copy from a dropped transfer counts as missing)."""
+        cmd = "python3 -c " + shlex.quote(self._HAS_PY) + " " + shlex.quote(self.root) + " " + " ".join(shlex.quote(a) for a in asset_ids)
+        r = self.run(cmd, capture=True)
         return {l.split()[0]: l.split()[1] == "1" for l in r.stdout.splitlines() if l.strip()}
 
     def _rsync(self, src: str, dst: str) -> float:
@@ -63,7 +75,7 @@ class RemoteStore:
             if have.get(aid):
                 continue
             a = store.get(aid)
-            self.run(f"mkdir -p {shlex.quote(self.root)}/{a.type}/.incoming")
+            self.run(f"mkdir -p {shlex.quote(self.root)}/{a.type}/.incoming && rm -rf {shlex.quote(self.root)}/{a.type}/{aid}")
             tmp = f"{self.root}/{a.type}/.incoming/{aid}"
             out[aid] = self._rsync(a.path + "/", f"{self.host}:{tmp}/")
             self.run(f"mv {shlex.quote(tmp)} {shlex.quote(self.root)}/{a.type}/{aid}")   # atomic: appears only when complete

@@ -27,11 +27,12 @@ def skill(name: str):
     return deco
 
 
-def code_params(extra_repos: dict[str, str] | None = None) -> dict:
-    """Code fingerprint that goes into every computed recipe, so an asset is tied to the exact
-    code that produced it (ct_laboratory, plus any repos registered via register_code_repo)."""
+def code_params() -> dict:
+    """Code fingerprint that goes into every computed recipe: ct_laboratory ONLY (the code that computes the
+    asset), so identical recipes get identical ids on every machine.  Client repos registered with
+    register_code_repo are recorded in the job status (provenance), not in asset ids."""
     from ..session import code_fingerprints
-    return {k: v["fingerprint"] for k, v in code_fingerprints({**CODE_REPOS, **(extra_repos or {})}).items()}
+    return {k: v["fingerprint"] for k, v in code_fingerprints().items()}
 
 
 CODE_REPOS: dict[str, str] = {}
