@@ -18,7 +18,7 @@ scp -q $SSHO -P $PORT "$(dirname "$0")/pod_check.py" root@$IP:/root/pod_check.py
 $SSH 'python /root/pod_check.py' || { echo "HOST REJECTED"; exit 3; }
 $SSH 'cat > /root/setup.sh <<"EOF"
 set -e
-pip install -q --break-system-packages ninja numpy==2.2.6 scipy==1.15.2 matplotlib==3.9.2 PyYAML==6.0.2 pandas==2.3.2 pydicom==3.0.1 xraydb==4.5.8 spekpy==2.5.4 scikit-image==0.25.2 scikit-learn==1.7.2 tqdm==4.66.4 imageio tifffile 2>&1 | grep -vi warn | tail -1
+pip install -q --break-system-packages ninja cupy-cuda12x numpy==2.2.6 scipy==1.15.2 matplotlib==3.9.2 PyYAML==6.0.2 pandas==2.3.2 pydicom==3.0.1 xraydb==4.5.8 spekpy==2.5.4 scikit-image==0.25.2 scikit-learn==1.7.2 tqdm==4.66.4 imageio tifffile 2>&1 | grep -vi warn | tail -1
 [ -d /root/ct_laboratory ] || git clone -q https://github.com/tivnanmatt/ct_laboratory.git /root/ct_laboratory
 cd /root/ct_laboratory && git remote set-url --push origin PUSH_DISABLED && git pull -q --ff-only
 TORCH_CUDA_ARCH_LIST="8.9;12.0+PTX" CUDA_HOME=/usr/local/cuda MAX_JOBS=32 PATH=/usr/local/cuda/bin:$PATH python setup.py build_ext --inplace > /root/build.log 2>&1

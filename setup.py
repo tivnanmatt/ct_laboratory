@@ -10,6 +10,7 @@ setup(
     packages=find_packages(include=["ct_laboratory", "ct_laboratory.*"]),
     package_data={"ct_laboratory.workflow": ["server_bootstrap.sh", "pod_check.py"]},
     entry_points={"console_scripts": ["ctlab=ct_laboratory.workflow.cli:main"]},
+    extras_require={"gpu": ["cupy-cuda12x"]},   # GPU eigensolver (SparseEigenDecomposition method="cupy_eigsh")
     ext_modules=[
         CUDAExtension(
             name="ct_laboratory._C",

@@ -10,3 +10,4 @@ from .sparse_eigen_decomposition import SparseEigenDecomposition
 from .preconditioners import (SparseEigenImagePreconditioner,
                               SparseEigenProjectionPreconditioner)
 from .weighted_preconditioner import WeightedSpectralSqrtPreconditioner
+from .gpu_solvers import cupy_available   # registers the optional "cupy_eigsh" solver (needs cupy at call time only)
