@@ -128,4 +128,19 @@ cal = CylinderCalibration(cfgt, start, data).fit(log=lambda *a: None); r = cal.r
 # density and the flat scatter level are partly degenerate on one cylinder (rho 1.5 % low <-> a_g 0.2 % high); the density prior (sd 0.02) decides
 check('cylinder calibration recovers radius / scatter, density within its prior (synthetic)', abs(r['geo'][0] - 50.0) < 0.3 and abs(r['geo'][1] - 1.03) < 0.02 and abs(r['params']['gain-scan scatter (% of air)'][0] - 3.0) < 0.5 and abs(r['bump']) < 0.5,
       f"R {r['geo'][0]:.2f} (50), rho {r['geo'][1]:.3f} (1.03), a_g {r['params']['gain-scan scatter (% of air)'][0]:.2f} % (3), bump {r['bump']:+.2f} mm")
+# 7 joint mode: two cylinders (different size, density, position) calibrate one source with ONE shared spectrum / gain scatter
+truthB = CylinderPhantom(radius=30.0, cx=-10.0, cy=8.0, mu=T(mu_w), density=1.10)
+simB = CylinderCalibration(cfgt, [truth, truthB], [dummy, dummy])
+with torch.no_grad():
+    simB.binned.params.set_value("gain", 0.03); _, ps = simB.forward_all()
+    obs = [((torch.poisson(p_["m"] / p_["sc"] * I0s + kap) - kap) / I0s) for p_ in ps]
+dsj = [FiringData(t=o_, I0=I0s, kappa=kap, good=torch.ones_like(o_, dtype=torch.bool), det_pos=pos, det_normal=nrm2, src=srcp, sub_pos=subp, arc_mm=arc, row_mm=rowz,
+                  module=mod, col=col, row=row, z_offsets=torch.zeros(NKs, device=dev), magnification=0.74) for o_ in obs]
+startA = CylinderPhantom(radius=48.0, cx=4.0, cy=-2.0, mu=T(mu_w), density=1.03)      # density priors at truth (density is degenerate with the flat scatter level)
+startB = CylinderPhantom(radius=29.0, cx=-9.0, cy=7.0, mu=T(mu_w), density=1.10)
+rj = CylinderCalibration(cfgt, [startA, startB], dsj).fit(log=lambda *a: None).result()
+gA, gB = rj["datasets"][0]["geo"], rj["datasets"][1]["geo"]
+check('joint mode: two cylinders, one shared spectrum / gain scatter', abs(gA[0] - 50) < 0.3 and abs(gB[0] - 30) < 0.3 and abs(gA[3] + 3) < 0.3 and abs(gB[3] - 8) < 0.3
+      and abs(gA[1] - 1.03) < 0.015 and abs(gB[1] - 1.10) < 0.015 and   # density couples to the unobservable depth abs(rj['datasets'][0]['bump']) < 0.3 and abs(rj['datasets'][1]['bump']) < 0.3,
+      f"R {gA[0]:.2f}/{gB[0]:.2f} (50/30), lateral cy {gA[3]:.2f}/{gB[3]:.2f} (-3/8; depth cx is unobservable from one view), rho {gA[1]:.3f}/{gB[1]:.3f} (1.03/1.10), bumps {rj['datasets'][0]['bump']:+.2f}/{rj['datasets'][1]['bump']:+.2f} mm")
 print('ALL PASS' if ok else 'SOME CHECKS FAILED')

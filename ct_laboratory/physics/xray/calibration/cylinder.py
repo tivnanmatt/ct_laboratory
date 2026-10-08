@@ -18,6 +18,9 @@ Outliers (|z| > 6 after a quarter of the steps) are masked.  Optimizer: Adam + c
 Outputs per source (CylinderCalibration.result): fitted parameters, per-pixel correction maps (a_g, a_ph, eps), detected spectrum,
 and the corrected-data test (estimated vs true water length vs ray radius; "bump" = centre - ring).
 
+Joint mode: several datasets (object scans, e.g. the 7 calcium cylinders) calibrate one source together - spectrum, detector, off-focal,
+gain-scan scatter and per-pixel eps are shared; phantom-scan scatter, geometry and output are per dataset (CylinderCalibration(cfg, [phantoms], [datas])).
+
 This is the method of recon_dev/20261005_multirot_active_window/steps/acr_ctlab_fit.py (2026-10-07), made reusable.
 """
 from __future__ import annotations
@@ -95,12 +98,54 @@ class CylinderCalibrationConfig:
     scatter_spectrum: bool = True
 
 
+class _Block:
+    """one dataset (object scan) of the source being calibrated: its phantom, data, geometry parameters and masks"""
+
+    def __init__(self, phantom: CylinderPhantom, data: FiringData, dev):
+        self.ph, self.D = phantom, data
+        self.mu_obj = phantom.mu.to(dev).float()
+        self.geo_mu = torch.tensor([phantom.radius, phantom.density, phantom.cx, phantom.cy], device=dev)
+        self.geo_sd = torch.tensor([phantom.radius_sd, phantom.density_sd, phantom.axis_sd, phantom.axis_sd], device=dev)
+        self.gz = torch.zeros(4, device=dev, requires_grad=True)
+        NK = data.t.shape[0]
+        zoff = torch.zeros(NK, 1, 1, 1, 3, device=dev); zoff[..., 2] = data.z_offsets[:, None, None, None]
+        self.src_all = (data.src + zoff).expand((NK,) + tuple(data.sub_pos.shape)).contiguous(); self.dst_all = data.sub_pos[None] + zoff
+        self.extra = data.extra_L if data.extra_L is not None else torch.zeros_like(data.t)
+        with torch.no_grad():
+            Lin, Lout = self.chords(self.geo_mu)
+            self.inside = (Lout.max(-1).values < 0.5) if phantom.require_inside_slab else torch.ones_like(data.good)
+        self.mask_out = torch.ones_like(data.good)
+        self.gy = torch.zeros_like(data.t); self.gy[..., 1:-1] = (data.t[..., 2:] - data.t[..., :-2]).abs() / 2
+
+    def geo(self): return self.geo_mu + self.geo_sd * self.gz
+
+    def chords(self, geo):
+        lo, hi = self.ph.z_slab
+        Lin, Lb, La = cylinder_chords(self.src_all, self.dst_all, geo[2], geo[3], geo[0], z_slabs=((lo, hi), (-1e4, lo), (hi, 1e4)))
+        return Lin, Lb + La
+
+
 class CylinderCalibration:
-    def __init__(self, cfg: CylinderCalibrationConfig, phantom: CylinderPhantom, data: FiringData, device="cuda:0"):
-        self.cfg, self.ph, self.D, self.dev = cfg, phantom, data, torch.device(device)
+    """Calibration of ONE source from one or several cylinder datasets.
+
+    Shared by all datasets: spectrum (kVp, Al, spline), detector, off-focal, gain-scan scatter a_g (one gain scan serves every object),
+    per-pixel gain error eps (profiled jointly over every station of every dataset), likelihood floor.
+    Per dataset (object dependent): phantom-scan scatter a_ph (one binned field per dataset), cylinder geometry (R, rho, axis), per-station output.
+    All datasets must share the pixel layout of this source's firing (same geometry, same active modules).
+    ``phantom`` / ``data`` may be single objects (one dataset, the original behaviour) or lists.
+    """
+
+    def __init__(self, cfg: CylinderCalibrationConfig, phantom, data, device="cuda:0"):
+        phs = phantom if isinstance(phantom, (list, tuple)) else [phantom]
+        ds = data if isinstance(data, (list, tuple)) else [data]
+        assert len(phs) == len(ds) and len(ds) >= 1
+        self.single = not isinstance(data, (list, tuple))
+        self.cfg, self.dev = cfg, torch.device(device)
         c, dev = cfg, self.dev
         f32 = lambda a: torch.as_tensor(np.asarray(a), dtype=torch.float32, device=dev)
-        self.E = f32(c.energies_keV); self.mu_obj = phantom.mu.to(dev).float()
+        self.E = f32(c.energies_keV)
+        D0 = ds[0]; R_, C_ = D0.t.shape[1:]
+        for D in ds[1:]: assert tuple(D.t.shape[1:]) == (R_, C_), "all datasets of one source need the same pixel layout"
         src = TungstenSpectrum(c.energies_keV, c.spek_kvps, c.spek_phi, c.mu_al, c.mu_w, kvp=c.kvp,
                                priors=dict(kvp=(c.kvp, 1.0), al_mm=(c.al_mm, math.log(2.0)), w_mm=(c.w_mm, math.log(5.0)), heel=(c.heel, 0.2)))
         for k_, v_ in (("kvp", c.kvp), ("al_mm", c.al_mm), ("w_mm", c.w_mm), ("heel", c.heel)): src.params.set_value(k_, v_)
@@ -110,80 +155,81 @@ class CylinderCalibration:
         det = ScintillatorDetector(c.energies_keV, c.mu_scint, thickness_mm=c.csi_mm); det.params.fix()
         off = OffFocalRadiation(fraction=c.off_focal_fraction, halo_sd_mm=c.halo_sd_mm); off.params.fix()
         self.lik = AirNormalizedGaussian(floor=c.floor, jitter_px=c.jitter_px).to(dev); self.lik.params.fix("jitter_px")
-        D = data; R_, C_ = D.t.shape[1:]
-        BI = module_bin_index(D.module, D.col, D.row, bin_px=c.bin_px); nb = int(BI.max()) + 1
-        colpos = torch.argsort(torch.argsort(D.arc_mm)).to(dev)
-        grid = bin_grid(BI, colpos[None].expand(R_, C_), bins_rows=(int(D.row.max()) + 1) // c.bin_px, bin_row_index=D.row // c.bin_px)
-        self.binned = BinnedAdditiveScatter(BI, nb, n_phantom_fields=1, gain=c.room_fraction, gain_sd=0.03, phantom_sd=c.phantom_sd, gain_flat=False,
+        BI = module_bin_index(D0.module, D0.col, D0.row, bin_px=c.bin_px); nb = int(BI.max()) + 1
+        colpos = torch.argsort(torch.argsort(D0.arc_mm)).to(dev)
+        grid = bin_grid(BI, colpos[None].expand(R_, C_), bins_rows=(int(D0.row.max()) + 1) // c.bin_px, bin_row_index=D0.row // c.bin_px)
+        self.binned = BinnedAdditiveScatter(BI, nb, n_phantom_fields=len(ds), gain=c.room_fraction, gain_sd=0.03, phantom_sd=c.phantom_sd, gain_flat=False,
                                             phantom_relative_to_gain=True, grid=grid, laplacian_gain=c.laplacian_gain, laplacian_phantom=c.laplacian_phantom)
         self.model = AirNormalizedProjectionModel(src, det, off, binned=self.binned, focal_blur=FocalSpotBlur(),
                                                   scatter_spectrum=ScatterSpectrum() if c.scatter_spectrum else None).to(dev)
         self.epi = PixelGainError(c.eps_sigma)
-        self.geo_mu = torch.tensor([phantom.radius, phantom.density, phantom.cx, phantom.cy], device=dev)
-        self.geo_sd = torch.tensor([phantom.radius_sd, phantom.density_sd, phantom.axis_sd, phantom.axis_sd], device=dev)
-        self.gz = torch.zeros(4, device=dev, requires_grad=True)
-        # geometry
-        dvec = D.det_pos - D.src; dn = dvec.norm(dim=-1)
-        self.cos_inc = (dvec * D.det_normal).sum(-1).abs() / dn
-        self.cone = torch.rad2deg(torch.atan2(dvec[..., 2], dvec[..., :2].norm(dim=-1))) - D.cone_offset_deg
-        NK = D.t.shape[0]
-        zoff = torch.zeros(NK, 1, 1, 1, 3, device=dev); zoff[..., 2] = D.z_offsets[:, None, None, None]
-        self.src_all = (D.src + zoff).expand((NK,) + tuple(D.sub_pos.shape)).contiguous(); self.dst_all = D.sub_pos[None] + zoff
-        self.extra = D.extra_L if D.extra_L is not None else torch.zeros_like(D.t)
-        self.fr = D.fluence_ratio if D.fluence_ratio is not None else torch.ones_like(D.I0)
-        with torch.no_grad():
-            Lin, Lout = self.chords(self.geo_mu)
-            self.inside = (Lout.max(-1).values < 0.5) if phantom.require_inside_slab else torch.ones_like(D.good)
-        self.mask_out = torch.ones_like(D.good)
-        self.gy = torch.zeros_like(D.t); self.gy[..., 1:-1] = (D.t[..., 2:] - D.t[..., :-2]).abs() / 2
+        dvec = D0.det_pos - D0.src; dn = dvec.norm(dim=-1)
+        self.cos_inc = (dvec * D0.det_normal).sum(-1).abs() / dn
+        self.cone = torch.rad2deg(torch.atan2(dvec[..., 2], dvec[..., :2].norm(dim=-1))) - D0.cone_offset_deg
+        self.fr = D0.fluence_ratio if D0.fluence_ratio is not None else torch.ones_like(D0.I0)
+        self.blocks = [_Block(ph, D, dev) for ph, D in zip(phs, ds)]
         self.snaps, self.losses = [], []
 
-    def geo(self): return self.geo_mu + self.geo_sd * self.gz
+    # backwards-compatible accessors (single dataset)
+    @property
+    def D(self): return self.blocks[0].D
+    @property
+    def gz(self): return self.blocks[0].gz
+    def geo(self): return self.blocks[0].geo()
 
-    def chords(self, geo):
-        lo, hi = self.ph.z_slab
-        Lin, Lb, La = cylinder_chords(self.src_all, self.dst_all, geo[2], geo[3], geo[0], z_slabs=((lo, hi), (-1e4, lo), (hi, 1e4)))
-        return Lin, Lb + La
-
-    def forward(self):
-        D, geo = self.D, self.geo()
-        Lin, _ = self.chords(geo); Leq = geo[1] * Lin + self.extra[..., None]
-        o = self.model(Leq[..., None] * self.mu_obj, self.cos_inc, self.cone, D.arc_mm, D.row_mm, D.magnification, fluence_ratio=self.fr)
-        T = o["T"]; mu_eff = (o["TE"] * o["w"] * self.mu_obj).sum(-1) / T.clamp(min=1e-9)
+    def _block_forward(self, b: _Block, field: int):
+        D, geo = b.D, b.geo()
+        Lin, _ = b.chords(geo); Leq = geo[1] * Lin + b.extra[..., None]
+        o = self.model(Leq[..., None] * b.mu_obj, self.cos_inc, self.cone, D.arc_mm, D.row_mm, D.magnification, fluence_ratio=self.fr, phantom_field=field)
+        T = o["T"]; mu_eff = (o["TE"] * o["w"] * b.mu_obj).sum(-1) / T.clamp(min=1e-9)
         Lm = Lin.mean(-1); sub_var = (geo[1] * Lin).var(-1) if Lin.shape[-1] > 1 else torch.zeros_like(T)
         bimp = torch.sqrt((geo[0] ** 2 - (Lm / 2) ** 2).clamp(min=1e-6)); dLdb = (bimp / torch.sqrt((geo[0] ** 2 - bimp ** 2).clamp(min=1.0))) * 2 * 0.3
-        sigL2 = sub_var + dLdb ** 2 * (Lm > 0.1) + (D.extra_L_sd_frac * self.extra) ** 2
-        msk = D.good & self.inside & self.mask_out
-        v0 = self.lik.variance(D.t, D.I0, D.kappa, self.gy); z_ = torch.zeros_like(T)
+        sigL2 = sub_var + dLdb ** 2 * (Lm > 0.1) + (D.extra_L_sd_frac * b.extra) ** 2
+        msk = D.good & b.inside & b.mask_out
+        v0 = self.lik.variance(D.t, D.I0, D.kappa, b.gy); z_ = torch.zeros_like(T)
         sc = (torch.where(msk, D.t * o["t"] / v0, z_).sum((1, 2)) / torch.where(msk, o["t"] ** 2 / v0, z_).sum((1, 2)).clamp(min=1e-9))[:, None, None]
         v = v0 + (sc * o["primary_weight"] * mu_eff * T) ** 2 * sigL2
-        m = sc * o["t"]
-        eps = self.epi.profile(D.t, m, v, msk); m = m * (1 + eps)
-        nll = self.epi.neg_log_prior(eps) + self.lik.nll(D.t, m, v, msk)
-        return nll, dict(m=m, v=v, sc=sc, eps=eps, mask=msk, T=T, w=o["w"], Lin=Lm, Leq=Leq.mean(-1), G=sc * o["off_focal"], S=sc * o["scatter"] * torch.ones_like(T),
-                         pw=o["primary_weight"] * torch.ones_like(T), ag=o["gain_scatter"] * torch.ones_like(D.I0), sigL=sigL2.detach().sqrt(), geo=geo)
+        return dict(m=sc * o["t"], v=v, sc=sc, mask=msk, T=T, w=o["w"], Lin=Lm, Leq=Leq.mean(-1), G=sc * o["off_focal"], S=sc * o["scatter"] * torch.ones_like(T),
+                    pw=o["primary_weight"] * torch.ones_like(T), ag=o["gain_scatter"] * torch.ones_like(D.I0), sigL=sigL2.detach().sqrt(), geo=geo)
+
+    def forward_all(self):
+        ps = [self._block_forward(b, i) for i, b in enumerate(self.blocks)]
+        t = torch.cat([b.D.t for b in self.blocks]); m = torch.cat([p["m"] for p in ps]); v = torch.cat([p["v"] for p in ps]); mk = torch.cat([p["mask"] for p in ps])
+        eps = self.epi.profile(t, m, v, mk)                               # shared by every station of every dataset (detector pixel property)
+        nll = self.epi.neg_log_prior(eps)
+        for b, p in zip(self.blocks, ps):
+            p["m"] = p["m"] * (1 + eps); p["eps"] = eps
+            nll = nll + self.lik.nll(b.D.t, p["m"], p["v"], p["mask"])
+        return nll, ps
+
+    def forward(self):
+        nll, ps = self.forward_all()
+        return nll, (ps[0] if self.single else ps)
 
     def loss(self):
-        nll, p = self.forward()
-        return nll + self.model.neg_log_prior() + self.lik.params.neg_log_prior() + 0.5 * (self.gz.double() ** 2).sum(), p
+        nll, ps = self.forward_all()
+        return nll + self.model.neg_log_prior() + self.lik.params.neg_log_prior() + sum(0.5 * (b.gz.double() ** 2).sum() for b in self.blocks), ps
 
     def fit(self, log=print, snapshot_every=None):
         c = self.cfg
         pars = [p for p in self.model.parameters() if p.requires_grad] + [p for p in self.lik.parameters() if p.requires_grad]
-        opt = torch.optim.Adam([dict(params=pars, lr=c.lr), dict(params=[self.gz], lr=c.lr)]); sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, c.steps)
+        gzs = [b.gz for b in self.blocks]
+        opt = torch.optim.Adam([dict(params=pars, lr=c.lr), dict(params=gzs, lr=c.lr)]); sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, c.steps)
         every = snapshot_every or max(1, c.steps // 40)
         for step in range(1, c.steps + 1):
-            opt.zero_grad(); f, p = self.loss(); f = torch.nan_to_num(f, nan=1e30, posinf=1e30); f.backward()
-            for q in pars + [self.gz]:
+            opt.zero_grad(); f, ps = self.loss(); f = torch.nan_to_num(f, nan=1e30, posinf=1e30); f.backward()
+            for q in pars + gzs:
                 if q.grad is not None: q.grad.nan_to_num_(0.0, 0.0, 0.0)
             opt.step(); sch.step(); self.losses.append(float(f.detach()))
             if step == c.steps // 4:
                 with torch.no_grad():
-                    _, p = self.forward(); o_ = (((self.D.t - p["m"]) / p["v"].sqrt()).abs() > c.outlier_z) & p["mask"]; self.mask_out &= ~o_
-                log(f"   outlier rejection: {int(o_.sum())} samples masked")
+                    _, ps = self.forward_all(); nbad = 0
+                    for b, p in zip(self.blocks, ps):
+                        o_ = (((b.D.t - p["m"]) / p["v"].sqrt()).abs() > c.outlier_z) & p["mask"]; b.mask_out &= ~o_; nbad += int(o_.sum())
+                log(f"   outlier rejection: {nbad} samples masked")
             if step % every == 0 or step == c.steps:
-                with torch.no_grad(): _, p = self.forward()
-                self.snaps.append(dict(step=step, geo=p["geo"].detach().cpu(), summary=self.summary(), loss=float(f)))
+                with torch.no_grad(): _, ps = self.forward_all()
+                self.snaps.append(dict(step=step, geo=[p["geo"].detach().cpu() for p in ps], summary=self.summary(), loss=float(f)))
         return self
 
     def summary(self):
@@ -193,32 +239,40 @@ class CylinderCalibration:
         return out
 
     @torch.no_grad()
-    def result(self):
-        """fitted parameters, per-pixel maps, spectrum and the corrected-data length test"""
-        _, p = self.forward(); D = self.D; geo = p["geo"]
-        Lg = torch.linspace(0, 320, 641, device=self.dev); mu = self.mu_obj
+    def _block_result(self, b: _Block, p: dict):
+        D = b.D; geo = p["geo"]; mu = b.mu_obj
+        Lg = torch.linspace(0, 320, 641, device=self.dev)
         Tc = ((D.t / (1 + p["eps"]) - p["G"] - p["S"]) / (p["sc"] * p["pw"])).clamp(1e-5, 1.5)
-        curve = (p["w"][..., None, :] * torch.exp(-mu * Lg[:, None])).sum(-1)              # [R, C, nL] (spectrum is per pixel, same for all stations)
-        curve = curve[None].expand(Tc.shape[0], -1, -1, -1)
-        j = (curve > Tc[..., None]).sum(-1).clamp(1, len(Lg) - 1)
-        c0 = curve.gather(-1, (j - 1)[..., None])[..., 0]; c1 = curve.gather(-1, j[..., None])[..., 0]
-        Lest = Lg[j - 1] + (c0 - Tc) / (c0 - c1).clamp(min=1e-9) * (Lg[1] - Lg[0]) - self.extra
+        curve = torch.einsum("rce,le->rcl", p["w"], torch.exp(-mu[None] * Lg[:, None]))    # [R, C, nL] (per-pixel spectrum, same for all stations)
+        j = torch.stack([(curve > Tc[k][..., None]).sum(-1) for k in range(Tc.shape[0])]).clamp(1, len(Lg) - 1)       # station by station (memory)
+        c0 = torch.stack([curve.gather(-1, (j[k] - 1)[..., None])[..., 0] for k in range(Tc.shape[0])]); c1 = torch.stack([curve.gather(-1, j[k][..., None])[..., 0] for k in range(Tc.shape[0])])
+        Lest = Lg[j - 1] + (c0 - Tc) / (c0 - c1).clamp(min=1e-9) * (Lg[1] - Lg[0]) - b.extra
         mu_e = (p["w"] * mu * torch.exp(-mu * Lest.clamp(min=0)[..., None])).sum(-1) / Tc.clamp(min=1e-6)
         sdL = torch.sqrt(p["v"]) / (p["sc"] * p["pw"]) / (mu_e * Tc).clamp(min=1e-9)
-        g_ = p["mask"] & (p["Lin"] > 1); b = torch.sqrt((geo[0] ** 2 - (p["Lin"] / 2) ** 2).clamp(min=0))
-        dL = (Lest - geo[1] * p["Lin"])[g_].cpu().numpy(); w = 1 / np.maximum(sdL[g_].cpu().numpy(), 0.05) ** 2; bb = b[g_].cpu().numpy()
+        g_ = p["mask"] & (p["Lin"] > 1); bimp = torch.sqrt((geo[0] ** 2 - (p["Lin"] / 2) ** 2).clamp(min=0))
+        dL = (Lest - geo[1] * p["Lin"])[g_].cpu().numpy(); w = 1 / np.maximum(sdL[g_].cpu().numpy(), 0.05) ** 2; bb = bimp[g_].cpu().numpy()
         def wmean(m_):
             if m_.sum() < 20: return float("nan"), float("nan")
             ww = w[m_]; mm = (ww * dL[m_]).sum() / ww.sum(); return float(mm), float(np.sqrt((ww ** 2 * (dL[m_] - mm) ** 2).sum()) / ww.sum())
         Rg = float(geo[0]); edges = np.linspace(0, 1.04 * Rg, 27); prof = [wmean((bb >= a) & (bb < c)) for a, c in zip(edges[:-1], edges[1:])]
         cen, ring = wmean(bb < 0.1 * Rg), wmean((bb >= 0.25 * Rg) & (bb < 0.45 * Rg))     # centre vs reference ring, as fractions of the radius (ACR: 10 / 25-45 mm)
         nz = dL / np.maximum(sdL[g_].cpu().numpy(), 1e-3)
-        w0 = p["w"][p["mask"].any(0)].mean(0); w0 = w0 / w0.sum()
-        return dict(params=self.summary(), geo=[float(v) for v in geo], losses=self.losses, snaps=self.snaps,
-                    bump=cen[0] - ring[0], bump_se=math.hypot(cen[1], ring[1]), centre=cen, ring=ring, bins=(0.5 * (edges[1:] + edges[:-1])).tolist(), profile=prof,
-                    coverage_1sd=float(np.mean(np.abs(nz) < 1)), eps_rms=float(p["eps"][p["mask"].any(0)].pow(2).mean().sqrt()), n_outliers=int((~self.mask_out).sum()),
-                    maps=dict(ag=p["ag"].cpu(), aph=(p["S"][0] / p["sc"][0]).cpu(), eps=p["eps"].cpu(), mask=p["mask"].any(0).cpu()),
-                    spectrum=dict(energies_keV=self.E.cpu(), w_src=w0.cpu()),
-                    off_focal=dict(fraction=float(self.model.off_focal.fraction), halo_sd_mm=float(self.model.off_focal.params["halo_sd_mm"]),
-                                   focal_sd_mm=self.model.off_focal.focal_sd_mm, mag=D.magnification),
-                    corrected=dict(L_est=Lest[g_].cpu(), L_true=(geo[1] * p["Lin"])[g_].cpu(), sd=sdL[g_].cpu(), b=b[g_].cpu()))
+        return dict(geo=[float(v) for v in geo], bump=cen[0] - ring[0], bump_se=math.hypot(cen[1], ring[1]), centre=cen, ring=ring, bins=(0.5 * (edges[1:] + edges[:-1])).tolist(), profile=prof,
+                    coverage_1sd=float(np.mean(np.abs(nz) < 1)), n_outliers=int((~b.mask_out).sum()), aph=(p["S"][0] / p["sc"][0]).cpu(),
+                    corrected=dict(L_est=Lest[g_].cpu(), L_true=(geo[1] * p["Lin"])[g_].cpu(), sd=sdL[g_].cpu(), b=bimp[g_].cpu()))
+
+    @torch.no_grad()
+    def result(self):
+        """shared parameters / maps / spectrum + per-dataset geometry, phantom scatter and corrected-data length test.
+        Single dataset: the per-dataset entries are merged into the top level (original layout)."""
+        _, ps = self.forward_all(); p0 = ps[0]
+        mk = torch.stack([p["mask"].any(0) for p in ps]).any(0)
+        w0 = p0["w"][mk].mean(0); w0 = w0 / w0.sum()
+        shared = dict(params=self.summary(), losses=self.losses, snaps=self.snaps, eps_rms=float(p0["eps"][mk].pow(2).mean().sqrt()),
+                      maps=dict(ag=p0["ag"].cpu(), eps=p0["eps"].cpu(), mask=mk.cpu()), spectrum=dict(energies_keV=self.E.cpu(), w_src=w0.cpu()),
+                      off_focal=dict(fraction=float(self.model.off_focal.fraction), halo_sd_mm=float(self.model.off_focal.params["halo_sd_mm"]),
+                                     focal_sd_mm=self.model.off_focal.focal_sd_mm, mag=self.blocks[0].D.magnification))
+        per = [self._block_result(b, p) for b, p in zip(self.blocks, ps)]
+        if self.single:
+            r = dict(shared, **per[0]); r["maps"] = dict(shared["maps"], aph=per[0].pop("aph")); r.pop("aph", None); return r
+        return dict(shared, datasets=per)
