@@ -26,7 +26,7 @@ from ..tomography import VoxelProjector3D, split_voxel_projector
 from ..tomography.voxel_projector_3d_module import make_views
 from ..workflow.gpus import available_devices
 
-__all__ = ["StepAndShootGeometry", "ProjectorSpec", "decimate", "RollingWindowOperator", "bin_sinogram", "window_eigen",
+__all__ = ["StepAndShootGeometry", "ProjectorSpec", "decimate", "RollingWindowOperator", "bin_sinogram", "window_eigen", "make_window_preconditioner",
            "lambda_max", "quadratic_penalty_grad", "pcg", "upsample_inplane", "cascade"]
 
 
@@ -198,14 +198,26 @@ class RollingWindowOperator:
             out[..., j * self.step:j * self.step + self.n_win] += self.A.back_project(t).reshape(self.wshape)
         return out
 
-    def window_gram(self, w_mean: torch.Tensor | None = None):
-        """Gram operator of ONE window (flat in, flat out) for the eigen-preconditioner."""
+    def window_gram(self, w_mean: torch.Tensor | None = None, beta: float = 0.0, scale: torch.Tensor | None = None):
+        """Window operator for the eigen-preconditioner (flat in, flat out):
+            S^-1 (A^T diag(w_mean) A + beta D^T D) S^-1      with S = sqrt(scale) (None: no scaling)
+        i.e. the (optionally sensitivity-normalized) REGULARIZED Hessian of one window."""
+        Ss = None if scale is None else scale.reshape(-1).sqrt()
         def gram(xf):
-            y = self.A.forward_project(xf.reshape(self.wshape))
+            x = xf if Ss is None else xf / Ss
+            y = self.A.forward_project(x.reshape(self.wshape))
             if w_mean is not None:
                 y = y * w_mean
-            return self.A.back_project(y).reshape(-1)
+            g = self.A.back_project(y).reshape(-1)
+            if beta:
+                g = g + quadratic_penalty_grad(x.reshape(self.wshape), beta).reshape(-1)
+            return g if Ss is None else g / Ss
         return gram
+
+    def sensitivity(self, w_mean: torch.Tensor | None = None, beta: float = 0.0) -> torch.Tensor:
+        """Diagonal of the regularized window Hessian: A^T w_mean (+ 6 beta, the Laplacian diagonal). One back projection."""
+        ones = torch.ones(self.n_ray, device=self.dev) if w_mean is None else w_mean
+        return self.A.back_project(ones).reshape(-1) + 6.0 * beta
 
     def describe(self) -> dict:
         return dict(nx=self.nx, B=self.B, n_win=self.n_win, n_tot=self.n_tot, n_rot=self.R, n_view=self.geom.n_view,
@@ -227,8 +239,10 @@ def bin_sinogram(y: torch.Tensor, w: torch.Tensor, n_view: int, n_u: int, n_v: i
 
 
 # ------------------------------------------------------------------ preconditioner, beta
-def window_eigen(op: RollingWindowOperator, k: int, w_mean: torch.Tensor | None = None, **kw) -> SparseEigenDecomposition:
-    dec = SparseEigenDecomposition(gram=op.window_gram(w_mean), k=k, volume_shape=op.wshape, device=op.dev)
+def window_eigen(op: RollingWindowOperator, k: int, w_mean: torch.Tensor | None = None, beta: float = 0.0,
+                 scale: torch.Tensor | None = None, **kw) -> SparseEigenDecomposition:
+    """Top-k eigenpairs of the window operator (see window_gram): scaled regularized Hessian when beta/scale are given."""
+    dec = SparseEigenDecomposition(gram=op.window_gram(w_mean, beta, scale), k=k, volume_shape=op.wshape, device=op.dev)
     dec.compute_weights(method=kw.pop("method", "eigsh"), compute_projection_basis=False, verbose=False, use_tqdm=False, **kw)
     return dec
 
@@ -252,17 +266,24 @@ def quadratic_penalty_grad(x: torch.Tensor, beta: float) -> torch.Tensor:
     return beta * g
 
 
-def make_window_preconditioner(op: RollingWindowOperator, dec: SparseEigenDecomposition):
-    """Apply the window image-preconditioner P^2 slab by slab over the full volume."""
+def make_window_preconditioner(op: RollingWindowOperator, dec: SparseEigenDecomposition, scale: torch.Tensor | None = None):
+    """Apply the window image-preconditioner slab by slab over the full volume.  With ``scale`` (the diagonal the basis
+    was computed under) the preconditioner is S^-1 P^2 S^-1, S = sqrt(scale): one eigen-filtered step in the scaled space."""
     P = dec.to_image_preconditioner()
     nw, nt = op.n_win, op.n_tot
+    Ss = None if scale is None else scale.reshape(op.wshape).sqrt()
 
     def Mpre(r):
         out = torch.empty_like(r)
         for s0 in range(0, nt, nw):
             s1 = min(s0 + nw, nt)
             slab = torch.zeros(op.wshape, device=r.device); slab[..., :s1 - s0] = r[..., s0:s1]
-            out[..., s0:s1] = P(P(slab.reshape(-1))).reshape(op.wshape)[..., :s1 - s0]
+            if Ss is not None:
+                slab = slab / Ss
+            z = P(P(slab.reshape(-1))).reshape(op.wshape)
+            if Ss is not None:
+                z = z / Ss
+            out[..., s0:s1] = z[..., :s1 - s0]
         return out
     return Mpre
 
@@ -314,15 +335,16 @@ def cascade(y1: torch.Tensor, w1: torch.Tensor, levels: list[dict], eigen_provid
         t_level = time.time()
         y, w = bin_sinogram(y1.to(op.dev), w1.to(op.dev), geom.n_view, geom.n_u, geom.n_v, B)
         log(f"[{nx}] {op.describe()}")
-        t = time.time(); dec = eigen_provider(op, k, w.mean(0)); t_eig = time.time() - t
-        lam = dec.eigenvalues
         t = time.time(); lam_full = lambda_max(op, w); t_lam = time.time() - t
         beta = lv.get("beta_scale", 1.0) * lam_full / 1200.0
+        scale = op.sensitivity(w.mean(0), beta) if lv.get("scaling", "sensitivity") == "sensitivity" else None
+        t = time.time(); dec = eigen_provider(op, k, w.mean(0), beta, scale); t_eig = time.time() - t
+        lam = dec.eigenvalues
         x0 = None
         if x is not None:
             assert x.shape[2] == op.n_tot, f"cascade levels must share the slice grid ({x.shape[2]} vs {op.n_tot})"
             x0 = upsample_inplane(x.to(op.dev), prev_nx, nx)
-        xs, conv = pcg(op, y, w, beta, iters, make_window_preconditioner(op, dec), x0, log=log)
+        xs, conv = pcg(op, y, w, beta, iters, make_window_preconditioner(op, dec, scale), x0, log=log)
         m = dict(nx=nx, B=B, k=k, iters=iters, beta=beta, lam_max=lam_full, eig_cond=float(lam.max() / lam.min()),
                  t_build_s=op.t_build, t_eig_s=round(t_eig, 2), t_lam_s=round(t_lam, 2), t_pcg_s=conv["t_pcg_s"],
                  rel_grad=conv["rel_grad"], t_level_s=round(time.time() - t_level, 2), devices=op.devices,

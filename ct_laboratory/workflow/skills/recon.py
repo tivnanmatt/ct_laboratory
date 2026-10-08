@@ -19,7 +19,7 @@ def recon_cascade(cfg, session, job):
     """cfg:
       sinogram: '@sinogram'
       levels: [{projector: '@projector@64', iters: 64, k: 32}, {projector: '@projector@128', iters: 48, k: 32}, ...]
-      beta_scale: 1.0   weighted_eigen: true   eigen_method: eigsh | cupy_eigsh   max_gpus: null   role: 'recon@<nx_last>'
+      beta_scale: 1.0   scaling: sensitivity | none (per level too)   weighted_eigen: true   eigen_method: eigsh | cupy_eigsh   max_gpus: null   role: 'recon@<nx_last>'
     All level projectors must select the same rotations and slice grid.  Produces volume_<nx>.pt per level + metrics.json."""
     d, sid = load_sinogram(session, cfg.get("sinogram", "@sinogram"))
     devices = available_devices(cfg.get("max_gpus"))
@@ -29,9 +29,10 @@ def recon_cascade(cfg, session, job):
     rots = ops[0].rotations
     assert all(op.rotations == rots for op in ops), "all levels must use the same rotations"
     y1, w1 = d["y"][rots], d["w"][rots]
-    levels = [dict(op=op, iters=int(l["iters"]), k=int(l.get("k", 32)), beta_scale=float(l.get("beta_scale", cfg.get("beta_scale", 1.0)))) for op, l in zip(ops, cfg["levels"])]
+    levels = [dict(op=op, iters=int(l["iters"]), k=int(l.get("k", 32)), beta_scale=float(l.get("beta_scale", cfg.get("beta_scale", 1.0))),
+                   scaling=l.get("scaling", cfg.get("scaling", "sensitivity"))) for op, l in zip(ops, cfg["levels"])]
     inputs = {"sinogram": sid, **{f"projector@{op.nx}": pid for op, pid in zip(ops, pids)}}
-    params = dict(levels=[dict(projector=pid, iters=lv["iters"], k=lv["k"], beta_scale=lv["beta_scale"]) for pid, lv in zip(pids, levels)],
+    params = dict(levels=[dict(projector=pid, iters=lv["iters"], k=lv["k"], beta_scale=lv["beta_scale"], scaling=lv["scaling"]) for pid, lv in zip(pids, levels)],
                   weighted_eigen=bool(cfg.get("weighted_eigen", True)), code=code_params(),
                   **({} if cfg.get("eigen_method", "eigsh") == "eigsh" else {"eigen_method": cfg["eigen_method"]}))
     store = session.store; role = cfg.get("role", f"recon@{ops[-1].nx}")
@@ -41,9 +42,10 @@ def recon_cascade(cfg, session, job):
         return {"outputs": {role: existing.id}, "metrics": dict(reused=True, **json.load(open(existing.file("metrics.json"))))}
     eig_used = {}
 
-    def provider(op, k, w_mean):
+    def provider(op, k, w_mean, beta=0.0, scale=None):
         pid = pids[ops.index(op)]
-        dec, aid, _ = get_or_compute_eigen(session, op, pid, k, w1 if params["weighted_eigen"] else None, sid if params["weighted_eigen"] else None, method=cfg.get("eigen_method", "eigsh"))
+        dec, aid, _ = get_or_compute_eigen(session, op, pid, k, w1 if params["weighted_eigen"] else None, sid if params["weighted_eigen"] else None, method=cfg.get("eigen_method", "eigsh"),
+                                           beta=float(beta), scaling="sensitivity" if scale is not None else "none")
         eig_used[f"eigen@{op.nx}"] = aid
         return dec
 

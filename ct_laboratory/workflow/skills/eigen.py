@@ -18,13 +18,14 @@ def load_sinogram(session, ref="@sinogram"):
     return torch.load(session.store.get(aid).file("sinogram.pt"), map_location="cpu", weights_only=False), aid
 
 
-def get_or_compute_eigen(session, op, pid, k, w1=None, sino_id=None, log=print, method="eigsh"):
+def get_or_compute_eigen(session, op, pid, k, w1=None, sino_id=None, log=print, method="eigsh", beta=0.0, scaling="none"):
     """(SparseEigenDecomposition, asset id, metrics) for projector asset ``pid``; computes and stores if missing."""
     store = session.store
     inputs = {"projector": pid}
     if sino_id:
         inputs["sinogram"] = sino_id          # weighted Gram: the mask enters the basis
-    params = dict(k=k, weighted=bool(sino_id), code=code_params(), **({} if method == "eigsh" else {"method": method}))
+    params = dict(k=k, weighted=bool(sino_id), code=code_params(), **({} if method == "eigsh" else {"method": method}),
+                  **({} if not beta and scaling == "none" else {"beta": float(beta), "scaling": scaling}))
     a = store.lookup_recipe("eigen", "eigen.compute", SKILL_VERSION, inputs, params)
     if a is not None:
         dec = SparseEigenDecomposition(gram=op.window_gram(), k=k, volume_shape=op.wshape, device=op.dev).load(a.file("eigen.pt"))
@@ -35,25 +36,33 @@ def get_or_compute_eigen(session, op, pid, k, w1=None, sino_id=None, log=print, 
         g = op.geom
         _, w = bin_sinogram(torch.zeros(w1.shape, dtype=torch.float32), w1, g.n_view, g.n_u, g.n_v, op.B)
         w_mean = w.to(op.dev).mean(0)
-    t = time.time(); dec = window_eigen(op, k, w_mean, method=method); t_eig = time.time() - t
+    scale = op.sensitivity(w_mean, beta) if scaling == "sensitivity" else None
+    t = time.time(); dec = window_eigen(op, k, w_mean, beta, scale, method=method); t_eig = time.time() - t
     lam = dec.eigenvalues
     st = store.stage_dir("eigen"); dec.save(os.path.join(st, "eigen.pt"))
     m = dict(reused=False, method=method, **getattr(dec, "last_solver_stats", {}), t_eig_s=round(t_eig, 2), cond=float(lam.max() / lam.min()), n_window=int(torch.tensor(op.wshape).prod()), devices=op.devices)
     a = store.put_computed("eigen", st, "eigen.compute", SKILL_VERSION, inputs, params,
-                           meta=dict(method=method, k=k, nx=op.nx, B=op.B, n_win=op.n_win, cond=m["cond"], eigenvalues_minmax=[float(lam.min()), float(lam.max())], t_eig_s=m["t_eig_s"]))
+                           meta=dict(method=method, beta=float(beta), scaling=scaling, k=k, nx=op.nx, B=op.B, n_win=op.n_win, cond=m["cond"], eigenvalues_minmax=[float(lam.min()), float(lam.max())], t_eig_s=m["t_eig_s"]))
     log(f"eigen k={k} for {pid}: computed in {t_eig:.1f} s on {op.devices} (cond {m['cond']:.2f}) -> {a.id}")
     return dec, a.id, m
 
 
 @skill("eigen.compute")
 def eigen_compute(cfg, session, job):
-    """cfg: {projector: '@projector@64', k: 32, weighted: true, sinogram: '@sinogram', role: 'eigen@64', method: eigsh | cupy_eigsh}"""
+    """cfg: {projector: '@projector@64', k: 32, weighted: true, sinogram: '@sinogram', role: 'eigen@64', method: eigsh | cupy_eigsh,
+             beta: 0 | <value> | 'auto' (lambda_max/1200 * beta_scale), scaling: none | sensitivity}
+    Default (beta: auto, scaling: sensitivity): basis of the sensitivity-normalized regularized window Hessian."""
     spec, geom, pid = load_projector(session, cfg.get("projector", "@projector"))
     op = spec.build(geom, available_devices(cfg.get("max_gpus")))
     w1 = sid = None
     if cfg.get("weighted", True):
         d, sid = load_sinogram(session, cfg.get("sinogram", "@sinogram")); w1 = d["w"][op.rotations]
-    _, aid, m = get_or_compute_eigen(session, op, pid, int(cfg["k"]), w1, sid, method=cfg.get("method", "eigsh"))
+    beta = cfg.get("beta", "auto"); scaling = cfg.get("scaling", "sensitivity")
+    if beta == "auto":
+        from ...reconstruction import lambda_max
+        _, wk = bin_sinogram(torch.zeros(w1.shape, dtype=torch.float32), w1, geom.n_view, geom.n_u, geom.n_v, op.B) if w1 is not None else (None, torch.ones(1, op.n_ray))
+        beta = float(cfg.get("beta_scale", 1.0)) * lambda_max(op, wk.to(op.dev)) / 1200.0
+    _, aid, m = get_or_compute_eigen(session, op, pid, int(cfg["k"]), w1, sid, method=cfg.get("method", "eigsh"), beta=float(beta), scaling=scaling)
     return {"outputs": {cfg.get("role", f"eigen@{op.nx}"): aid}, "metrics": m}
 
 
