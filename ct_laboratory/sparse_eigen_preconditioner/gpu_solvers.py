@@ -37,12 +37,17 @@ def _solve_cupy_eigsh(self, gram, N, k, tol=1e-3, maxiter=5000, seed=42, ncv=Non
     with cp.cuda.Device(dev.index or 0):
         def matvec(x):
             counter["n"] += 1
-            xt = torch.from_dlpack(cp.ascontiguousarray(x.ravel().astype(cp.float32)))      # zero-copy view
+            # torch-owned copy of the input and an explicit sync on every device: CuPy and torch use different
+            # streams, and the Gram may run on several GPUs (split projector); sharing buffers across them races
+            xt = torch.from_dlpack(cp.ascontiguousarray(x.ravel().astype(cp.float32))).clone()
+            cp.cuda.Device(dev.index or 0).synchronize()
             with torch.no_grad():
-                gx = self._apply_gram(xt.to(dt))
+                gx = self._apply_gram(xt.to(dt)).detach().float().contiguous()
+            for i in range(torch.cuda.device_count()):
+                torch.cuda.synchronize(i)
             if verbose and (counter["n"] == 1 or counter["n"] % 250 == 0):
                 print(f"  [cupy_eigsh] matvec {counter['n']}", flush=True)
-            return cp.from_dlpack(gx.detach().float().contiguous())
+            return cp.from_dlpack(gx).copy()
 
         op = LinearOperator((N, N), matvec=matvec, dtype=cp.float32)
         rs = cp.random.RandomState(int(seed) if seed is not None else None)

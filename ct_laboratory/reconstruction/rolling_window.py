@@ -26,7 +26,7 @@ from ..tomography import VoxelProjector3D, split_voxel_projector
 from ..tomography.voxel_projector_3d_module import make_views
 from ..workflow.gpus import available_devices
 
-__all__ = ["StepAndShootGeometry", "ProjectorSpec", "decimate", "RollingWindowOperator", "bin_sinogram", "window_eigen", "make_window_preconditioner",
+__all__ = ["StepAndShootGeometry", "ProjectorSpec", "decimate", "RollingWindowOperator", "bin_sinogram", "window_eigen", "make_window_preconditioner", "resample_volume",
            "lambda_max", "quadratic_penalty_grad", "pcg", "upsample_inplane", "cascade"]
 
 
@@ -313,14 +313,17 @@ def pcg(op: RollingWindowOperator, y: torch.Tensor, w: torch.Tensor, beta: float
 
 def upsample_inplane(x: torch.Tensor, nx_from: int, nx_to: int) -> torch.Tensor:
     """Trilinear in-plane upsampling on exact voxel-centre grids (z unchanged)."""
-    nzt = x.shape[2]; s = nx_to / nx_from
-    j = torch.arange(nx_to, dtype=torch.float32, device=x.device)
-    ci = (j / s) / (nx_from - 1) * 2 - 1
-    kz = torch.arange(nzt, dtype=torch.float32, device=x.device) / (nzt - 1) * 2 - 1
-    gi, gj, gk = torch.meshgrid(ci, ci, kz, indexing="ij")
-    vol = x.permute(2, 1, 0)[None, None]
-    grid = torch.stack([gi, gj, gk], -1).permute(2, 1, 0, 3)[None]
-    return F.grid_sample(vol, grid, mode="bilinear", padding_mode="border", align_corners=True)[0, 0].permute(2, 1, 0).contiguous()
+    return resample_volume(x, (nx_to, nx_to, x.shape[2]))
+
+
+def resample_volume(x: torch.Tensor, shape_to: tuple[int, int, int]) -> torch.Tensor:
+    """Trilinear resampling between two grids that cover the SAME physical box (voxel centres at
+    (i + 0.5) / n of the box): used to warm-start a finer cascade level, in-plane and/or axially."""
+    if tuple(x.shape) == tuple(shape_to):
+        return x
+    vol = x.permute(2, 1, 0)[None, None]                                   # [1,1,Z,Y,X]
+    out = F.interpolate(vol, size=(shape_to[2], shape_to[1], shape_to[0]), mode="trilinear", align_corners=False)
+    return out[0, 0].permute(2, 1, 0).contiguous()
 
 
 def cascade(y1: torch.Tensor, w1: torch.Tensor, levels: list[dict], eigen_provider, log=print) -> tuple[list[tuple[int, torch.Tensor]], list[dict]]:
@@ -340,10 +343,7 @@ def cascade(y1: torch.Tensor, w1: torch.Tensor, levels: list[dict], eigen_provid
         scale = op.sensitivity(w.mean(0), beta) if lv.get("scaling", "sensitivity") == "sensitivity" else None
         t = time.time(); dec = eigen_provider(op, k, w.mean(0), beta, scale); t_eig = time.time() - t
         lam = dec.eigenvalues
-        x0 = None
-        if x is not None:
-            assert x.shape[2] == op.n_tot, f"cascade levels must share the slice grid ({x.shape[2]} vs {op.n_tot})"
-            x0 = upsample_inplane(x.to(op.dev), prev_nx, nx)
+        x0 = None if x is None else resample_volume(x.to(op.dev), op.shape)     # levels cover the same box (any voxel size)
         xs, conv = pcg(op, y, w, beta, iters, make_window_preconditioner(op, dec, scale), x0, log=log)
         m = dict(nx=nx, B=B, k=k, iters=iters, beta=beta, lam_max=lam_full, eig_cond=float(lam.max() / lam.min()),
                  t_build_s=op.t_build, t_eig_s=round(t_eig, 2), t_lam_s=round(t_lam, 2), t_pcg_s=conv["t_pcg_s"],
