@@ -16,7 +16,8 @@ Likelihood: AirNormalizedGaussian - Poisson + read noise + model-error floor + e
 Outliers (|z| > 6 after a quarter of the steps) are masked.  Optimizer: Adam + cosine schedule on whitened parameters.
 
 Outputs per source (CylinderCalibration.result): fitted parameters, per-pixel correction maps (a_g, a_ph, eps), detected spectrum,
-and the corrected-data test (estimated vs true water length vs ray radius; "bump" = centre - ring).
+and the projection-domain QA of the corrected data in HU-equivalent units (1000 (L_est - L_true) / L_true): CT-number accuracy,
+centre and peripheral (x = +-0.7 R) ROIs, uniformity (max |peripheral - centre|), diameter profile vs signed ray offset x / R, 1-sigma coverage.
 
 Joint mode: several datasets (object scans, e.g. the 7 calcium cylinders) calibrate one source together - spectrum, detector, off-focal,
 gain-scan scatter and per-pixel eps are shared; phantom-scan scatter, geometry and output are per dataset (CylinderCalibration(cfg, [phantoms], [datas])).
@@ -96,6 +97,8 @@ class CylinderCalibrationConfig:
     steps: int = 200; lr: float = 0.05; outlier_z: float = 6.0
     free_spectrum: bool = True            # kVp, Al, spline per source
     scatter_spectrum: bool = True
+    qa_roi_half_width: float = 0.11       # ROI half width / R
+    qa_peripheral_x: float = 0.7          # peripheral ROI centres at +-x / R (small phantoms: keep clear of the rim blur, e.g. 0.5)
 
 
 class _Block:
@@ -249,17 +252,31 @@ class CylinderCalibration:
         Lest = Lg[j - 1] + (c0 - Tc) / (c0 - c1).clamp(min=1e-9) * (Lg[1] - Lg[0]) - b.extra
         mu_e = (p["w"] * mu * torch.exp(-mu * Lest.clamp(min=0)[..., None])).sum(-1) / Tc.clamp(min=1e-6)
         sdL = torch.sqrt(p["v"]) / (p["sc"] * p["pw"]) / (mu_e * Tc).clamp(min=1e-9)
-        g_ = p["mask"] & (p["Lin"] > 1); bimp = torch.sqrt((geo[0] ** 2 - (p["Lin"] / 2) ** 2).clamp(min=0))
-        dL = (Lest - geo[1] * p["Lin"])[g_].cpu().numpy(); w = 1 / np.maximum(sdL[g_].cpu().numpy(), 0.05) ** 2; bb = bimp[g_].cpu().numpy()
-        def wmean(m_):
-            if m_.sum() < 20: return float("nan"), float("nan")
-            ww = w[m_]; mm = (ww * dL[m_]).sum() / ww.sum(); return float(mm), float(np.sqrt((ww ** 2 * (dL[m_] - mm) ** 2).sum()) / ww.sum())
-        Rg = float(geo[0]); edges = np.linspace(0, 1.04 * Rg, 27); prof = [wmean((bb >= a) & (bb < c)) for a, c in zip(edges[:-1], edges[1:])]
-        cen, ring = wmean(bb < 0.1 * Rg), wmean((bb >= 0.25 * Rg) & (bb < 0.45 * Rg))     # centre vs reference ring, as fractions of the radius (ACR: 10 / 25-45 mm)
-        nz = dL / np.maximum(sdL[g_].cpu().numpy(), 1e-3)
-        return dict(geo=[float(v) for v in geo], bump=cen[0] - ring[0], bump_se=math.hypot(cen[1], ring[1]), centre=cen, ring=ring, bins=(0.5 * (edges[1:] + edges[:-1])).tolist(), profile=prof,
-                    coverage_1sd=float(np.mean(np.abs(nz) < 1)), n_outliers=int((~b.mask_out).sum()), aph=(p["S"][0] / p["sc"][0]).cpu(),
-                    corrected=dict(L_est=Lest[g_].cpu(), L_true=(geo[1] * p["Lin"])[g_].cpu(), sd=sdL[g_].cpu(), b=bimp[g_].cpu()))
+        g_ = p["mask"] & (p["Lin"] > 1)
+        # signed ray offset x from the cylinder axis (transaxial): |x| from the chord, sign from the side of the axis the ray passes
+        Lt = geo[1] * p["Lin"]; absx = torch.sqrt((geo[0] ** 2 - (p["Lin"] / 2) ** 2).clamp(min=0))
+        d2 = (b.dst_all.mean(-2) - b.src_all.mean(-2))[..., :2]; w2 = torch.stack([geo[2], geo[3]]) - b.src_all.mean(-2)[..., :2]
+        sgn = torch.sign(d2[..., 0] * w2[..., 1] - d2[..., 1] * w2[..., 0]); x = (sgn * absx / geo[0])[g_].cpu().numpy()
+        # HU-equivalent line-integral error: 1000 (L_est - L_true) / L_true = mean attenuation error along the ray
+        hu = (1000 * (Lest - Lt) / Lt.clamp(min=1e-3))[g_].cpu().numpy(); hu_sd = (1000 * sdL / Lt.clamp(min=1e-3))[g_].cpu().numpy()
+        w = 1 / np.maximum(hu_sd, 0.5) ** 2
+        def roi(m_):
+            if m_.sum() < 20: return dict(mean_hu=float("nan"), se_hu=float("nan"), n=int(m_.sum()))
+            ww = w[m_]; mm = (ww * hu[m_]).sum() / ww.sum()
+            return dict(mean_hu=float(mm), se_hu=float(np.sqrt((ww ** 2 * (hu[m_] - mm) ** 2).sum()) / ww.sum()), n=int(m_.sum()))
+        edges = np.linspace(-1.0, 1.0, 41); prof = [roi((x >= a) & (x < c)) for a, c in zip(edges[:-1], edges[1:])]
+        H, XP = self.cfg.qa_roi_half_width, self.cfg.qa_peripheral_x     # ACR layout: 11 mm ROIs, peripheral centres 70 mm from the axis of a 100 mm radius phantom
+        rois = dict(centre=roi(np.abs(x) < H), peripheral_left=roi(np.abs(x + XP) < H), peripheral_right=roi(np.abs(x - XP) < H))
+        uni = max(abs(rois[k]["mean_hu"] - rois["centre"]["mean_hu"]) for k in ("peripheral_left", "peripheral_right"))
+        acc = roi(np.ones_like(x, dtype=bool))
+        nz = (hu - acc["mean_hu"] * 0) / np.maximum(hu_sd, 1e-3)
+        return dict(geo=[float(v) for v in geo],
+                    qa=dict(units="HU-equivalent line-integral error 1000 (L_est - L_true) / L_true",
+                            accuracy=acc, roi=rois, uniformity_hu=float(uni),
+                            diameter_profile=dict(x_over_R=(0.5 * (edges[1:] + edges[:-1])).tolist(), mean_hu=[q["mean_hu"] for q in prof], se_hu=[q["se_hu"] for q in prof]),
+                            coverage_1sigma=float(np.mean(np.abs(nz) < 1))),
+                    n_outliers=int((~b.mask_out).sum()), aph=(p["S"][0] / p["sc"][0]).cpu(),
+                    corrected=dict(L_est=Lest[g_].cpu(), L_true=Lt[g_].cpu(), sd=sdL[g_].cpu(), x_over_R=torch.from_numpy(x)))
 
     @torch.no_grad()
     def result(self):

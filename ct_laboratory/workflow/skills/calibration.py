@@ -13,9 +13,11 @@ Config
                 (R, rho, axis) and per-station output are per dataset (object dependent).  Result per source: shared params + datasets[]
   spectrum:     {kvp, al_mm, w_mm, heel, spline, csi_mm, spek: path to spek npz or null (spekpy)}; off_focal {fraction, halo_sd_mm}
   room_fraction, floor, jitter_px, eps_sigma, laplacian_gain, laplacian_phantom, steps, lr, sources: [ids] or null (all)
+  qa_roi_half_width (0.11), qa_peripheral_x (0.7): ROI layout of the projection QA as fractions of R (ACR 464 layout by default)
 Output
   calibration asset: calibration.pt = {sources: {sid: result}, energies_keV, config}; one entry per fitted source with parameters,
-  per-pixel maps (a_g, a_ph, eps in the firing's ray order), detected spectrum and the corrected-data length test.
+  per-pixel maps (a_g, a_ph, eps in the firing's ray order), detected spectrum and the projection-domain QA (qa: CT-number accuracy,
+  centre / peripheral ROIs, uniformity, diameter profile, 1-sigma coverage; HU-equivalent line-integral error).
 """
 from __future__ import annotations
 
@@ -82,7 +84,8 @@ def calibration_cylinder(cfg, session, job):
                                      off_focal_fraction=ofc["fraction"], halo_sd_mm=ofc["halo_sd_mm"],
                                      room_fraction=float(cfg.get("room_fraction", 0.035)), floor=float(cfg.get("floor", 0.002)), jitter_px=float(cfg.get("jitter_px", 0.195)),
                                      eps_sigma=float(cfg.get("eps_sigma", 0.01)), laplacian_gain=float(cfg.get("laplacian_gain", 5e7)), laplacian_phantom=float(cfg.get("laplacian_phantom", 1.25e6)),
-                                     steps=int(cfg.get("steps", 200)), lr=float(cfg.get("lr", 0.05)))
+                                     steps=int(cfg.get("steps", 200)), lr=float(cfg.get("lr", 0.05)),
+                                     qa_roi_half_width=float(cfg.get("qa_roi_half_width", 0.11)), qa_peripheral_x=float(cfg.get("qa_peripheral_x", 0.7)))
     def make_phantom(phc):
         return CylinderPhantom(radius=float(phc["radius_mm"]), cx=float(phc["cx"]), cy=float(phc["cy"]), mu=torch.tensor(_mu(phc.get("material", "water"), keV), dtype=torch.float32),
                                density=float(phc.get("density", 1.0)), z_slab=tuple(phc.get("z_slab", (-1e4, 1e4))), radius_sd=float(phc.get("radius_sd", 1.0)),
@@ -147,21 +150,21 @@ def calibration_cylinder(cfg, session, job):
             print(f"source {sid}: only {n_in} good samples inside the phantom slab (smallest dataset), skipped"); continue
         cal.fit(log=lambda *a: None); r = cal.result()
         per = r["datasets"] if joint else [r]
-        if not all(math.isfinite(q["bump"]) and all(math.isfinite(v) for v in q["geo"]) for q in per):
+        if not all(math.isfinite(q["qa"]["uniformity_hu"]) and all(math.isfinite(v) for v in q["geo"]) for q in per):
             print(f"source {sid}: fit diverged (NaN), skipped"); continue
         r["ray_slices"] = fl.ray_slices; r["layout"] = dict(row=ro_.cpu(), col=ci_.cpu())
         if joint:
             for d_, q in zip(dsc, per): q["name"] = d_["name"]
-            r["bump"] = float(np.median([q["bump"] for q in per]))
+            r["qa"] = dict(uniformity_hu=float(max(q["qa"]["uniformity_hu"] for q in per)), accuracy_hu=float(np.median([q["qa"]["accuracy"]["mean_hu"] for q in per])))
         results[sid] = r; n_fit += 1
-        bstr = " ".join(f"{q['bump']:+.2f}" for q in per); rstr = " ".join(f"{q['geo'][1]:.3f}" for q in per)
-        print(f"source {sid:4d}: bump {bstr} mm, floor {r['params'].get('noise floor (% of air)', float('nan')):.3f} %, "
+        bstr = " ".join(f"{q['qa']['uniformity_hu']:.1f}" for q in per); astr = " ".join(f"{q['qa']['accuracy']['mean_hu']:+.1f}" for q in per); rstr = " ".join(f"{q['geo'][1]:.3f}" for q in per)
+        print(f"source {sid:4d}: uniformity {bstr} HU-eq, accuracy {astr} HU-eq, floor {r['params'].get('noise floor (% of air)', float('nan')):.3f} %, "
               f"Al {r['params'].get('Al filtration (mm)', float('nan')):.1f} mm, rho {rstr} [{time.time()-t0:.0f}s]", flush=True)
-    bumps = np.array([r["bump"] for r in results.values()])
+    unis = np.array([(r["qa"]["uniformity_hu"]) for r in results.values()])
     stage = store.stage_dir("calibration")
     torch.save(dict(sources=results, energies_keV=E, config=params, rotations=rots, joint=joint, datasets=[d_["name"] for d_ in dsc]), os.path.join(stage, "calibration.pt"))
-    metrics = dict(t_s=round(time.time() - t0, 1), n_sources=n_fit, bump_median_mm=float(np.median(bumps)) if n_fit else None,
-                   bump_iqr_mm=[float(np.percentile(bumps, 25)), float(np.percentile(bumps, 75))] if n_fit else None, device=dev)
+    metrics = dict(t_s=round(time.time() - t0, 1), n_sources=n_fit, uniformity_hu_median=float(np.median(unis)) if n_fit else None,
+                   uniformity_hu_p90=float(np.percentile(unis, 90)) if n_fit else None, device=dev)
     a = store.put_computed("calibration", stage, "calibration.cylinder", SKILL_VERSION, inputs, params, meta=metrics)
-    print(f"calibration -> {a.id}: {n_fit} sources, bump median {metrics['bump_median_mm']} mm in {metrics['t_s']} s")
+    print(f"calibration -> {a.id}: {n_fit} sources, projection-domain uniformity median {metrics['uniformity_hu_median']} HU-eq (p90 {metrics['uniformity_hu_p90']}) in {metrics['t_s']} s")
     return {"outputs": {role: a.id}, "metrics": metrics}

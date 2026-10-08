@@ -126,8 +126,8 @@ data = FiringData(t=t_obs, I0=I0s, kappa=kap, good=torch.ones_like(t_obs, dtype=
                   z_offsets=torch.zeros(NKs, device=dev), magnification=0.74)
 cal = CylinderCalibration(cfgt, start, data).fit(log=lambda *a: None); r = cal.result()
 # density and the flat scatter level are partly degenerate on one cylinder (rho 1.5 % low <-> a_g 0.2 % high); the density prior (sd 0.02) decides
-check('cylinder calibration recovers radius / scatter, density within its prior (synthetic)', abs(r['geo'][0] - 50.0) < 0.3 and abs(r['geo'][1] - 1.03) < 0.02 and abs(r['params']['gain-scan scatter (% of air)'][0] - 3.0) < 0.5 and abs(r['bump']) < 0.5,
-      f"R {r['geo'][0]:.2f} (50), rho {r['geo'][1]:.3f} (1.03), a_g {r['params']['gain-scan scatter (% of air)'][0]:.2f} % (3), bump {r['bump']:+.2f} mm")
+check('cylinder calibration recovers radius / scatter, density within its prior; QA uniformity and accuracy (synthetic)', abs(r['geo'][0] - 50.0) < 0.3 and abs(r['geo'][1] - 1.03) < 0.02 and abs(r['params']['gain-scan scatter (% of air)'][0] - 3.0) < 0.5 and r['qa']['uniformity_hu'] < 10 and abs(r['qa']['accuracy']['mean_hu']) < 10,
+      f"R {r['geo'][0]:.2f} (50), rho {r['geo'][1]:.3f} (1.03), a_g {r['params']['gain-scan scatter (% of air)'][0]:.2f} % (3), uniformity {r['qa']['uniformity_hu']:.1f} HU-eq, accuracy {r['qa']['accuracy']['mean_hu']:+.1f} HU-eq")
 # 7 joint mode: two cylinders (different size, density, position) calibrate one source with ONE shared spectrum / gain scatter
 truthB = CylinderPhantom(radius=30.0, cx=-10.0, cy=8.0, mu=T(mu_w), density=1.10)
 simB = CylinderCalibration(cfgt, [truth, truthB], [dummy, dummy])
@@ -141,6 +141,7 @@ startB = CylinderPhantom(radius=29.0, cx=-9.0, cy=7.0, mu=T(mu_w), density=1.10)
 rj = CylinderCalibration(cfgt, [startA, startB], dsj).fit(log=lambda *a: None).result()
 gA, gB = rj["datasets"][0]["geo"], rj["datasets"][1]["geo"]
 check('joint mode: two cylinders, one shared spectrum / gain scatter', abs(gA[0] - 50) < 0.3 and abs(gB[0] - 30) < 0.3 and abs(gA[3] + 3) < 0.3 and abs(gB[3] - 8) < 0.3
-      and abs(gA[1] - 1.03) < 0.015 and abs(gB[1] - 1.10) < 0.015 and   # density couples to the unobservable depth abs(rj['datasets'][0]['bump']) < 0.3 and abs(rj['datasets'][1]['bump']) < 0.3,
-      f"R {gA[0]:.2f}/{gB[0]:.2f} (50/30), lateral cy {gA[3]:.2f}/{gB[3]:.2f} (-3/8; depth cx is unobservable from one view), rho {gA[1]:.3f}/{gB[1]:.3f} (1.03/1.10), bumps {rj['datasets'][0]['bump']:+.2f}/{rj['datasets'][1]['bump']:+.2f} mm")
+      and abs(gA[1] - 1.03) < 0.015 and abs(gB[1] - 1.10) < 0.015            # density couples to the unobservable depth
+      and rj['datasets'][0]['qa']['uniformity_hu'] < 10 and rj['datasets'][1]['qa']['uniformity_hu'] < 10,
+      f"R {gA[0]:.2f}/{gB[0]:.2f} (50/30), lateral cy {gA[3]:.2f}/{gB[3]:.2f} (-3/8; depth cx is unobservable from one view), rho {gA[1]:.3f}/{gB[1]:.3f} (1.03/1.10), uniformity {rj['datasets'][0]['qa']['uniformity_hu']:.1f}/{rj['datasets'][1]['qa']['uniformity_hu']:.1f} HU-eq")
 print('ALL PASS' if ok else 'SOME CHECKS FAILED')
