@@ -13,6 +13,7 @@ eigen-preconditioner, warm-started level to level in a multi-resolution cascade.
 """
 from __future__ import annotations
 
+import contextlib
 import math
 import time
 from dataclasses import dataclass, field
@@ -167,8 +168,9 @@ class RollingWindowOperator:
         if len(self.devices) > 1:
             self.A = split_voxel_projector(nx, nx, self.n_win, M, b, views, devices=self.devices,
                                            output_device=self.dev, backend="cuda", cache=cache)
-        else:
-            self.A = VoxelProjector3D(nx, nx, self.n_win, M, b, views, device=self.dev, backend="cuda", cache=cache)
+        else:   # the SF kernels launch on the CURRENT device: build (and use) under this projector's device
+            with torch.cuda.device(self.dev) if self.dev.type == "cuda" else contextlib.nullcontext():
+                self.A = VoxelProjector3D(nx, nx, self.n_win, M, b, views, device=self.dev, backend="cuda", cache=cache)
         self._sync(); self.t_build = time.time() - t
         self.n_ray = int(self.A.n_ray)
         self.wshape, self.shape = (nx, nx, self.n_win), (nx, nx, self.n_tot)
