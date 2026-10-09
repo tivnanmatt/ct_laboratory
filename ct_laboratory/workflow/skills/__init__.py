@@ -43,4 +43,4 @@ def register_code_repo(name: str, path: str) -> None:
     CODE_REPOS[name] = path
 
 
-from . import assets_io, calibration, correction, eigen, projector, recon  # noqa: E402,F401  (registers the skills)
+from . import apply_calibration, assets_io, calibration, correction, eigen, projector, recon  # noqa: E402,F401  (registers the skills)
