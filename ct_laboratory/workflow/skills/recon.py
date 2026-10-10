@@ -27,8 +27,11 @@ def recon_cascade(cfg, session, job):
     for l in cfg["levels"]:
         spec, geom, pid = load_projector(session, l["projector"]); specs.append((spec, geom)); pids.append(pid); nxs.append(spec.nx)
     y1, w1 = d["y"], d["w"]                                   # all stations; each level selects its own rotations (cascade())
-    levels = [dict(op=None, build=(lambda sg=sg: sg[0].build(sg[1], devices)), iters=int(l["iters"]), k=int(l.get("k", 32)), beta_scale=float(l.get("beta_scale", cfg.get("beta_scale", 1.0))),
-                   scaling=l.get("scaling", cfg.get("scaling", "sensitivity"))) for sg, l in zip(specs, cfg["levels"])]    # built one at a time inside cascade()
+    built = {}                                                # level index -> operator (built one at a time inside cascade())
+    def _build(i):
+        built.clear(); built[i] = specs[i][0].build(specs[i][1], devices); return built[i]
+    levels = [dict(op=None, build=(lambda i=i: _build(i)), iters=int(l["iters"]), k=int(l.get("k", 32)), beta_scale=float(l.get("beta_scale", cfg.get("beta_scale", 1.0))),
+                   scaling=l.get("scaling", cfg.get("scaling", "sensitivity"))) for i, l in enumerate(cfg["levels"])]
     inputs = {"sinogram": sid, **{f"projector@{nx}": pid for nx, pid in zip(nxs, pids)}}
     params = dict(levels=[dict(projector=pid, iters=lv["iters"], k=lv["k"], beta_scale=lv["beta_scale"], scaling=lv["scaling"]) for pid, lv in zip(pids, levels)],
                   weighted_eigen=bool(cfg.get("weighted_eigen", True)), code=code_params(),
@@ -41,7 +44,7 @@ def recon_cascade(cfg, session, job):
     eig_used = {}
 
     def provider(op, k, w_mean, beta=0.0, scale=None):
-        pid = pids[[i for i, (sp, _) in enumerate(specs) if sp.nx == op.nx and sp.n_win == op.n_win and sp.B == op.B][0]]
+        pid = pids[[i for i, o in built.items() if o is op][0]]
         dec, aid, _ = get_or_compute_eigen(session, op, pid, k, w1 if params["weighted_eigen"] else None, sid if params["weighted_eigen"] else None, method=cfg.get("eigen_method", "eigsh"),
                                            beta=float(beta), scaling="sensitivity" if scale is not None else "none")
         eig_used[f"eigen@{op.nx}"] = aid
