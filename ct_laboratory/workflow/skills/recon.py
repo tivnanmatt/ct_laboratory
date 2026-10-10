@@ -55,6 +55,6 @@ def recon_cascade(cfg, session, job):
     summary = dict(levels=metrics, t_total_s=round(time.time() - t0, 2), devices=devices, eigen=eig_used, rotations=[m["rotations"] for m in metrics], projectors=pids)
     json.dump(summary, open(os.path.join(st, "metrics.json"), "w"), indent=1)
     a = store.put_computed("recon", st, "recon.cascade", SKILL_VERSION, inputs, params,
-                           meta=dict(levels=[op.nx for op in ops], t_total_s=summary["t_total_s"], eigen=eig_used, devices=devices))
+                           meta=dict(levels=list(nxs), t_total_s=summary["t_total_s"], eigen=eig_used, devices=devices))
     print(f"recon -> {a.id} ({a.size_bytes/1e6:.0f} MB) in {summary['t_total_s']} s on {len(devices)} GPU(s)")
     return {"outputs": {role: a.id, **eig_used}, "metrics": summary}
