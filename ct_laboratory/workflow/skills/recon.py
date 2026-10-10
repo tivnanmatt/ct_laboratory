@@ -52,7 +52,7 @@ def recon_cascade(cfg, session, job):
     st = store.stage_dir("recon")
     for nx, v in vols:
         torch.save(v, os.path.join(st, f"volume_{nx}.pt"))
-    summary = dict(levels=metrics, t_total_s=round(time.time() - t0, 2), devices=devices, eigen=eig_used, rotations=rots, projectors=pids)
+    summary = dict(levels=metrics, t_total_s=round(time.time() - t0, 2), devices=devices, eigen=eig_used, rotations=[op.rotations for op in ops], projectors=pids)
     json.dump(summary, open(os.path.join(st, "metrics.json"), "w"), indent=1)
     a = store.put_computed("recon", st, "recon.cascade", SKILL_VERSION, inputs, params,
                            meta=dict(levels=[op.nx for op in ops], t_total_s=summary["t_total_s"], eigen=eig_used, devices=devices))
