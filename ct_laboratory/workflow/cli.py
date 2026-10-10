@@ -84,8 +84,12 @@ def cmd_run(a):
     if r.returncode != 0:
         sys.stderr.write(r.stderr[-4000:]); sys.exit(f"remote job failed (rc {r.returncode})")
     res = json.loads(r.stdout.strip().splitlines()[-1])
-    t = time.time(); pulled = remote.pull(store, list(res["outputs"].values()))
-    print(f"pulled {len(pulled)} output assets in {time.time() - t:.1f} s")
+    # pull outputs; server-resident types (eigen bases, GBs each) stay on the server unless --pull-all
+    keep = set((a.server_resident or "").split(",")) - {""}
+    want = [v for v in res["outputs"].values() if a.pull_all or v.rsplit("-", 1)[0] not in keep]
+    t = time.time(); pulled = remote.pull(store, want)
+    skipped = [v for v in res["outputs"].values() if v not in want]
+    print(f"pulled {len(pulled)} output assets in {time.time() - t:.1f} s" + (f"; left on {a.remote}: {skipped}" if skipped else ""))
     # record the remote run as a local job (bind outputs to this session)
     def done(cfg_, sess_, job_):
         print(f"remote job {res['job']} on {a.remote}: {res['status']}"); return {"outputs": res["outputs"], "metrics": dict(res.get("metrics") or {}, remote=a.remote, remote_job=res["job"], pushed_s=pushed, pulled_s=pulled)}
@@ -102,7 +106,8 @@ def main(argv=None):
     p = ss.add_parser("show"); p.add_argument("session")
     p = ss.add_parser("bind"); p.add_argument("session"); p.add_argument("pairs", nargs="*", help="role=asset_id")
     p = sp.add_parser("run"); p.add_argument("skill"); p.add_argument("config"); p.add_argument("-s", "--session", required=True)
-    p.add_argument("--remote"); p.add_argument("--remote-root", default="/root/recon_assets"); p.add_argument("--remote-code", default="/root/ct_laboratory", help="directory to cd into on the server (python must import ct_laboratory there)")
+    p.add_argument("--remote"); p.add_argument("--server-resident", default="eigen", help="comma-separated asset types that are not pulled back from the server"); p.add_argument("--pull-all", action="store_true")
+    p.add_argument("--remote-root", default="/root/recon_assets"); p.add_argument("--remote-code", default="/root/ct_laboratory", help="directory to cd into on the server (python must import ct_laboratory there)")
     p.add_argument("--code-repo", action="append", default=[], help="name=path of a client repo whose commit enters recipe hashes")
     p.add_argument("--json", action="store_true", help="print a one-line JSON result last (used by --remote)")
     p = sp.add_parser("assets"); p.add_argument("-t", "--type")
