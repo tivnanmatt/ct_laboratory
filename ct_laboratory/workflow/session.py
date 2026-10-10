@@ -93,8 +93,9 @@ class Session:
         except KeyError:
             raise KeyError(f"session {self.name} has no role {role!r}; have {sorted(self.roles)}") from None
 
-    def set(self, role: str, asset_id: str) -> None:
-        if not self.store.exists(asset_id):
+    def set(self, role: str, asset_id: str, allow_missing: bool = False) -> None:
+        """Bind a role; ``allow_missing`` for assets that live only on a server (e.g. eigen bases of a remote job)."""
+        if not allow_missing and not self.store.exists(asset_id):
             raise FileNotFoundError(f"asset {asset_id} not in store {self.store.root}")
         d = self.data; d["roles"][role] = asset_id; d["updated"] = _now(); self._write(d)
 
@@ -159,7 +160,7 @@ def run_job(session: Session, skill: str, config: dict, fn: Callable[[dict, Sess
         print(f"[job {jid}] {skill} in session {session.name}", flush=True)
         res = fn(config, session, job) or {}
         for role, aid in (res.get("outputs") or {}).items():
-            session.set(role, aid)
+            session.set(role, aid, allow_missing=bool(config.get("_remote")))     # remote jobs may leave outputs on the server
         job.write_status(state="COMPLETED", end=_now(), wall_s=round(time.time() - t0, 2),
                          outputs=res.get("outputs") or {}, metrics=res.get("metrics") or {})
         print(f"[job {jid}] COMPLETED in {time.time() - t0:.1f} s; outputs {res.get('outputs')}", flush=True)

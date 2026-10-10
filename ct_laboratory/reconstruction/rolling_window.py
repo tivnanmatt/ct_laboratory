@@ -328,15 +328,16 @@ def resample_volume(x: torch.Tensor, shape_to: tuple[int, int, int]) -> torch.Te
 
 def cascade(y1: torch.Tensor, w1: torch.Tensor, levels: list[dict], eigen_provider, log=print) -> tuple[list[tuple[int, torch.Tensor]], list[dict]]:
     """Multi-resolution cascade.  levels = [{op: RollingWindowOperator, iters, k, beta_scale}, ...] coarse to
-    fine (each op built from a projector asset; all must select the same rotations); y1/w1 are the bin-1
-    sinogram rows of those rotations.  eigen_provider(op, k, w_mean) -> SparseEigenDecomposition.
+    fine (each op built from a projector asset; levels may select different stations); y1/w1 are the bin-1
+    sinogram rows of ALL stations (or of exactly this level's stations).  eigen_provider(op, k, w_mean) -> SparseEigenDecomposition.
     Returns the volume of every level and per-level metrics."""
     vols, metrics, x = [], [], None
     for lv in levels:
         op, iters, k = lv["op"], lv["iters"], lv["k"]
         nx, B, geom = op.nx, op.B, op.geom
         t_level = time.time()
-        y, w = bin_sinogram(y1.to(op.dev), w1.to(op.dev), geom.n_view, geom.n_u, geom.n_v, B)
+        rows = op.rotations if y1.shape[0] != len(op.rotations) else slice(None)        # y1/w1: all stations (bin 1) -> this level's stations
+        y, w = bin_sinogram(y1[rows].to(op.dev), w1[rows].to(op.dev), geom.n_view, geom.n_u, geom.n_v, B)
         log(f"[{nx}] {op.describe()}")
         t = time.time(); lam_full = lambda_max(op, w); t_lam = time.time() - t
         beta = lv.get("beta_scale", 1.0) * lam_full / 1200.0

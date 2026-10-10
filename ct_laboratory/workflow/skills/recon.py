@@ -20,15 +20,13 @@ def recon_cascade(cfg, session, job):
       sinogram: '@sinogram'
       levels: [{projector: '@projector@64', iters: 64, k: 32}, {projector: '@projector@128', iters: 48, k: 32}, ...]
       beta_scale: 1.0   scaling: sensitivity | none (per level too)   weighted_eigen: true   eigen_method: eigsh | cupy_eigsh   max_gpus: null   role: 'recon@<nx_last>'
-    All level projectors must select the same rotations and slice grid.  Produces volume_<nx>.pt per level + metrics.json."""
+    Levels may select different station subsets (e.g. every 4th at 8 mm); the warm start is resampled in 3-D.  Produces volume_<nx>.pt per level + metrics.json."""
     d, sid = load_sinogram(session, cfg.get("sinogram", "@sinogram"))
     devices = available_devices(cfg.get("max_gpus"))
     ops, pids = [], []
     for l in cfg["levels"]:
         spec, geom, pid = load_projector(session, l["projector"]); ops.append(spec.build(geom, devices)); pids.append(pid)
-    rots = ops[0].rotations
-    assert all(op.rotations == rots for op in ops), "all levels must use the same rotations"
-    y1, w1 = d["y"][rots], d["w"][rots]
+    y1, w1 = d["y"], d["w"]                                   # all stations; each level selects its own rotations (cascade())
     levels = [dict(op=op, iters=int(l["iters"]), k=int(l.get("k", 32)), beta_scale=float(l.get("beta_scale", cfg.get("beta_scale", 1.0))),
                    scaling=l.get("scaling", cfg.get("scaling", "sensitivity"))) for op, l in zip(ops, cfg["levels"])]
     inputs = {"sinogram": sid, **{f"projector@{op.nx}": pid for op, pid in zip(ops, pids)}}

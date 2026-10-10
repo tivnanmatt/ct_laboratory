@@ -25,7 +25,7 @@ def get_or_compute_eigen(session, op, pid, k, w1=None, sino_id=None, log=print, 
     if sino_id:
         inputs["sinogram"] = sino_id          # weighted Gram: the mask enters the basis
     params = dict(k=k, weighted=bool(sino_id), code=code_params(), **({} if method == "eigsh" else {"method": method}),
-                  **({} if not beta and scaling == "none" else {"beta": float(beta), "scaling": scaling}))
+                  **({} if not beta and scaling == "none" else {"beta": float(f"{float(beta):.4g}"), "scaling": scaling}))   # 4 s.f.: lambda_max is a randomised estimate
     a = store.lookup_recipe("eigen", "eigen.compute", SKILL_VERSION, inputs, params)
     if a is not None:
         dec = SparseEigenDecomposition(gram=op.window_gram(), k=k, volume_shape=op.wshape, device=op.dev).load(a.file("eigen.pt"))
