@@ -58,6 +58,7 @@ def _solve_cupy_eigsh(self, gram, N, k, tol=1e-3, maxiter=5000, seed=42, ncv=Non
         order = cp.argsort(w)[::-1]
         s2 = torch.from_dlpack(cp.ascontiguousarray(cp.clip(w[order], 0.0, None))).to(dt).clone()
         Vt = torch.from_dlpack(cp.ascontiguousarray(V[:, order])).to(dt).clone()
+        del w, V, order, v0, op; cp.get_default_memory_pool().free_all_blocks(); cp.get_default_pinned_memory_pool().free_all_blocks()   # release the Lanczos workspace (GBs) back to the device
     if verbose:
         print(f"  [cupy_eigsh] done in {counter['n']} matvecs, {time.time() - t0:.1f} s", flush=True)
     self.last_solver_stats = dict(matvecs=counter["n"], ncv=ncv)
