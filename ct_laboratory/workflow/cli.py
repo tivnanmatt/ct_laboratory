@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")   # before torch is imported: less fragmentation on 16 GB cards
 import shlex
 import sys
 

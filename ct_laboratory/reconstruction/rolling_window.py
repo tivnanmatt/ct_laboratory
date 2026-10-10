@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import math
-import time
+import gc, time
 from dataclasses import dataclass, field
 
 import torch
@@ -333,11 +333,13 @@ def cascade(y1: torch.Tensor, w1: torch.Tensor, levels: list[dict], eigen_provid
     Returns the volume of every level and per-level metrics."""
     vols, metrics, x = [], [], None
     for lv in levels:
-        op, iters, k = lv["op"], lv["iters"], lv["k"]
+        op = lv["op"] if lv.get("op") is not None else lv["build"]()                   # ops may be built lazily (one level resident at a time)
+        iters, k = lv["iters"], lv["k"]
         nx, B, geom = op.nx, op.B, op.geom
         t_level = time.time()
         rows = op.rotations if y1.shape[0] != len(op.rotations) else slice(None)        # y1/w1: all stations (bin 1) -> this level's stations
-        y, w = bin_sinogram(y1[rows].to(op.dev), w1[rows].to(op.dev), geom.n_view, geom.n_u, geom.n_v, B)
+        y, w = bin_sinogram(y1[rows], w1[rows], geom.n_view, geom.n_u, geom.n_v, B)    # bin on the CPU (bin-1 temporaries are GBs), then move
+        y, w = y.to(op.dev), w.to(op.dev)
         log(f"[{nx}] {op.describe()}")
         t = time.time(); lam_full = lambda_max(op, w); t_lam = time.time() - t
         beta = lv.get("beta_scale", 1.0) * lam_full / 1200.0
@@ -350,8 +352,8 @@ def cascade(y1: torch.Tensor, w1: torch.Tensor, levels: list[dict], eigen_provid
                  t_build_s=op.t_build, t_eig_s=round(t_eig, 2), t_lam_s=round(t_lam, 2), t_pcg_s=conv["t_pcg_s"],
                  rel_grad=conv["rel_grad"], t_level_s=round(time.time() - t_level, 2), devices=op.devices,
                  peak_gpu_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2) if torch.cuda.is_available() else 0,
-                 history=conv["history"])
+                 history=conv["history"], rotations=list(op.rotations))
         log(f"[{nx}] eig {t_eig:.1f} s (cond {m['eig_cond']:.2f}), lam_max {t_lam:.1f} s, PCG {iters} it {conv['t_pcg_s']} s, level {m['t_level_s']} s")
-        vols.append((nx, xs.cpu())); metrics.append(m); x, prev_nx = xs, nx
-        del dec; torch.cuda.empty_cache()
+        vols.append((nx, xs.cpu())); metrics.append(m); x = xs.cpu()
+        del dec, xs, y, w, scale, x0; lv["op"] = None; del op; gc.collect(); torch.cuda.empty_cache()   # free this level before the next
     return vols, metrics

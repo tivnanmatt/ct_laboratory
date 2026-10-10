@@ -23,17 +23,17 @@ def recon_cascade(cfg, session, job):
     Levels may select different station subsets (e.g. every 4th at 8 mm); the warm start is resampled in 3-D.  Produces volume_<nx>.pt per level + metrics.json."""
     d, sid = load_sinogram(session, cfg.get("sinogram", "@sinogram"))
     devices = available_devices(cfg.get("max_gpus"))
-    ops, pids = [], []
+    specs, pids, nxs = [], [], []
     for l in cfg["levels"]:
-        spec, geom, pid = load_projector(session, l["projector"]); ops.append(spec.build(geom, devices)); pids.append(pid)
+        spec, geom, pid = load_projector(session, l["projector"]); specs.append((spec, geom)); pids.append(pid); nxs.append(spec.nx)
     y1, w1 = d["y"], d["w"]                                   # all stations; each level selects its own rotations (cascade())
-    levels = [dict(op=op, iters=int(l["iters"]), k=int(l.get("k", 32)), beta_scale=float(l.get("beta_scale", cfg.get("beta_scale", 1.0))),
-                   scaling=l.get("scaling", cfg.get("scaling", "sensitivity"))) for op, l in zip(ops, cfg["levels"])]
-    inputs = {"sinogram": sid, **{f"projector@{op.nx}": pid for op, pid in zip(ops, pids)}}
+    levels = [dict(op=None, build=(lambda sg=sg: sg[0].build(sg[1], devices)), iters=int(l["iters"]), k=int(l.get("k", 32)), beta_scale=float(l.get("beta_scale", cfg.get("beta_scale", 1.0))),
+                   scaling=l.get("scaling", cfg.get("scaling", "sensitivity"))) for sg, l in zip(specs, cfg["levels"])]    # built one at a time inside cascade()
+    inputs = {"sinogram": sid, **{f"projector@{nx}": pid for nx, pid in zip(nxs, pids)}}
     params = dict(levels=[dict(projector=pid, iters=lv["iters"], k=lv["k"], beta_scale=lv["beta_scale"], scaling=lv["scaling"]) for pid, lv in zip(pids, levels)],
                   weighted_eigen=bool(cfg.get("weighted_eigen", True)), code=code_params(),
                   **({} if cfg.get("eigen_method", "eigsh") == "eigsh" else {"eigen_method": cfg["eigen_method"]}))
-    store = session.store; role = cfg.get("role", f"recon@{ops[-1].nx}")
+    store = session.store; role = cfg.get("role", f"recon@{nxs[-1]}")
     existing = store.lookup_recipe("recon", "recon.cascade", SKILL_VERSION, inputs, params)
     if existing is not None and not cfg.get("force", False):
         print(f"recon: reused {existing.id}")
@@ -41,7 +41,7 @@ def recon_cascade(cfg, session, job):
     eig_used = {}
 
     def provider(op, k, w_mean, beta=0.0, scale=None):
-        pid = pids[ops.index(op)]
+        pid = pids[[i for i, (sp, _) in enumerate(specs) if sp.nx == op.nx and sp.n_win == op.n_win and sp.B == op.B][0]]
         dec, aid, _ = get_or_compute_eigen(session, op, pid, k, w1 if params["weighted_eigen"] else None, sid if params["weighted_eigen"] else None, method=cfg.get("eigen_method", "eigsh"),
                                            beta=float(beta), scaling="sensitivity" if scale is not None else "none")
         eig_used[f"eigen@{op.nx}"] = aid
@@ -52,7 +52,7 @@ def recon_cascade(cfg, session, job):
     st = store.stage_dir("recon")
     for nx, v in vols:
         torch.save(v, os.path.join(st, f"volume_{nx}.pt"))
-    summary = dict(levels=metrics, t_total_s=round(time.time() - t0, 2), devices=devices, eigen=eig_used, rotations=[op.rotations for op in ops], projectors=pids)
+    summary = dict(levels=metrics, t_total_s=round(time.time() - t0, 2), devices=devices, eigen=eig_used, rotations=[m["rotations"] for m in metrics], projectors=pids)
     json.dump(summary, open(os.path.join(st, "metrics.json"), "w"), indent=1)
     a = store.put_computed("recon", st, "recon.cascade", SKILL_VERSION, inputs, params,
                            meta=dict(levels=[op.nx for op in ops], t_total_s=summary["t_total_s"], eigen=eig_used, devices=devices))
