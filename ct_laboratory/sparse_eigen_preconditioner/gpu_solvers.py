@@ -10,7 +10,7 @@ Why: with ARPACK (scipy, host) every Lanczos step re-orthogonalizes against the 
 """
 from __future__ import annotations
 
-import time
+import gc, time
 
 import torch
 
@@ -54,6 +54,7 @@ def _solve_cupy_eigsh(self, gram, N, k, tol=1e-3, maxiter=5000, seed=42, ncv=Non
         v0 = rs.standard_normal(N, dtype=cp.float32)
         ncv = ncv if ncv is not None else min(N - 1, max(20, 2 * k + 1))
         t0 = time.time()
+        gc.collect(); torch.cuda.empty_cache()                                   # hand PyTorch's reserved-but-free blocks to the CuPy pool
         w, V = eigsh(op, k=k, which="LM", ncv=ncv, v0=v0, tol=tol, maxiter=maxiter, return_eigenvectors=True)
         order = cp.argsort(w)[::-1]
         s2 = torch.from_dlpack(cp.ascontiguousarray(cp.clip(w[order], 0.0, None))).to(dt).clone()
