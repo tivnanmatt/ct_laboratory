@@ -34,7 +34,7 @@ def recon_cascade(cfg, session, job):
                    scaling=l.get("scaling", cfg.get("scaling", "sensitivity"))) for i, l in enumerate(cfg["levels"])]
     inputs = {"sinogram": sid, **{f"projector@{nx}": pid for nx, pid in zip(nxs, pids)}}
     params = dict(levels=[dict(projector=pid, iters=lv["iters"], k=lv["k"], beta_scale=lv["beta_scale"], scaling=lv["scaling"]) for pid, lv in zip(pids, levels)],
-                  weighted_eigen=bool(cfg.get("weighted_eigen", True)), code=code_params(),
+                  weighted_eigen=bool(cfg.get("weighted_eigen", True)), code=code_params(), warm_start="physical",
                   **({} if cfg.get("eigen_method", "eigsh") == "eigsh" else {"eigen_method": cfg["eigen_method"]}))
     store = session.store; role = cfg.get("role", f"recon@{nxs[-1]}")
     existing = store.lookup_recipe("recon", "recon.cascade", SKILL_VERSION, inputs, params)

@@ -26,7 +26,7 @@ from ..tomography import VoxelProjector3D, split_voxel_projector
 from ..tomography.voxel_projector_3d_module import make_views
 from ..workflow.gpus import available_devices
 
-__all__ = ["StepAndShootGeometry", "ProjectorSpec", "decimate", "RollingWindowOperator", "bin_sinogram", "window_eigen", "make_window_preconditioner", "resample_volume",
+__all__ = ["StepAndShootGeometry", "ProjectorSpec", "decimate", "RollingWindowOperator", "bin_sinogram", "window_eigen", "make_window_preconditioner", "resample_volume", "resample_physical", "volume_box",
            "lambda_max", "quadratic_penalty_grad", "pcg", "upsample_inplane", "cascade"]
 
 
@@ -111,10 +111,10 @@ class ProjectorSpec:
             steps = {rots[i + 1] - rots[i] for i in range(len(rots) - 1)}
             assert len(steps) == 1, f"rotations must be equally spaced, got steps {steps}"
             g = StepAndShootGeometry(S=geom.S, C=geom.C, U=geom.U, V=geom.V, pitch_u=geom.pitch_u, pitch_v=geom.pitch_v, n_u=geom.n_u, n_v=geom.n_v,
-                                     n_rot=len(rots), dz_rot=geom.dz_rot * steps.pop(), z_mid=geom.z_mid, meta=dict(geom.meta, rotations=rots))
+                                     n_rot=len(rots), dz_rot=geom.dz_rot * steps.pop(), z_mid=geom.z_mid, meta=dict(geom.meta, rotations=rots, dz_rot_model=geom.dz_rot))
         else:
             g = StepAndShootGeometry(S=geom.S, C=geom.C, U=geom.U, V=geom.V, pitch_u=geom.pitch_u, pitch_v=geom.pitch_v, n_u=geom.n_u, n_v=geom.n_v,
-                                     n_rot=1, dz_rot=0.0, z_mid=geom.z_mid, meta=dict(geom.meta, rotations=rots))
+                                     n_rot=1, dz_rot=0.0, z_mid=geom.z_mid, meta=dict(geom.meta, rotations=rots, dz_rot_model=geom.dz_rot))
         return g, rots
 
     def build(self, geom: StepAndShootGeometry, devices: list[str] | None = None) -> "RollingWindowOperator":
@@ -326,12 +326,39 @@ def resample_volume(x: torch.Tensor, shape_to: tuple[int, int, int]) -> torch.Te
     return out[0, 0].permute(2, 1, 0).contiguous()
 
 
+def volume_box(op) -> dict:
+    """Physical box of an operator's volume: voxel centres at x0 + (i + 0.5) * vox in-plane and z0 + (k + 0.5) * dz
+    axially (absolute z: the rolling window is placed in the frame of the first selected model rotation)."""
+    rots = list(getattr(op, "rotations", [0]) or [0]); g = op.geom
+    d0 = g.meta.get("dz_rot_model") or (g.dz_rot / (rots[1] - rots[0]) if len(rots) > 1 else 0.0)
+    return dict(x0=-(op.nx // 2) * op.vox, vox=op.vox, nx=op.nx, z0=op.z0 + rots[0] * d0, dz=op.dz, nz=op.n_tot)
+
+
+def _interp_matrix(c_to: torch.Tensor, start: float, step: float, n: int) -> torch.Tensor:
+    """[len(c_to), n] linear-interpolation weights from a grid with centres start + (i + 0.5) * step; zero outside its box,
+    clamped to the outermost centres within the box."""
+    u = (c_to - start) / step - 0.5; inside = (u >= -0.5) & (u <= n - 0.5)
+    u = u.clamp(0, n - 1); i0 = u.floor().long().clamp(max=max(n - 2, 0)); f = (u - i0).clamp(0, 1)
+    W = torch.zeros(len(c_to), n, dtype=torch.float32)
+    r = torch.arange(len(c_to)); W[r, i0] += (1 - f); W[r, (i0 + 1).clamp(max=n - 1)] += f
+    W[~inside] = 0.0; return W
+
+
+def resample_physical(x: torch.Tensor, box_from: dict, box_to: dict) -> torch.Tensor:
+    """Warm-start resampling between cascade levels that may cover DIFFERENT physical boxes (field of view, slice size,
+    axial window): separable linear interpolation by physical position, zero outside the source box."""
+    cx = box_to["x0"] + (torch.arange(box_to["nx"]) + 0.5) * box_to["vox"]; cz = box_to["z0"] + (torch.arange(box_to["nz"]) + 0.5) * box_to["dz"]
+    Wx = _interp_matrix(cx, box_from["x0"], box_from["vox"], x.shape[0]); Wz = _interp_matrix(cz, box_from["z0"], box_from["dz"], x.shape[2])
+    out = torch.einsum("ai,ijk->ajk", Wx, x.float().cpu()); out = torch.einsum("bj,ajk->abk", Wx, out); out = torch.einsum("ck,abk->abc", Wz, out)
+    return out.contiguous()
+
+
 def cascade(y1: torch.Tensor, w1: torch.Tensor, levels: list[dict], eigen_provider, log=print) -> tuple[list[tuple[int, torch.Tensor]], list[dict]]:
     """Multi-resolution cascade.  levels = [{op: RollingWindowOperator, iters, k, beta_scale}, ...] coarse to
     fine (each op built from a projector asset; levels may select different stations); y1/w1 are the bin-1
     sinogram rows of ALL stations (or of exactly this level's stations).  eigen_provider(op, k, w_mean) -> SparseEigenDecomposition.
     Returns the volume of every level and per-level metrics."""
-    vols, metrics, x = [], [], None
+    vols, metrics, x, box_prev = [], [], None, None
     for lv in levels:
         op = lv["op"] if lv.get("op") is not None else lv["build"]()                   # ops may be built lazily (one level resident at a time)
         iters, k = lv["iters"], lv["k"]
@@ -346,7 +373,8 @@ def cascade(y1: torch.Tensor, w1: torch.Tensor, levels: list[dict], eigen_provid
         scale = op.sensitivity(w.mean(0), beta) if lv.get("scaling", "sensitivity") == "sensitivity" else None
         t = time.time(); dec = eigen_provider(op, k, w.mean(0), beta, scale); t_eig = time.time() - t
         lam = dec.eigenvalues
-        x0 = None if x is None else resample_volume(x.to(op.dev), op.shape)     # levels cover the same box (any voxel size)
+        box = volume_box(op)                                                    # levels may cover different boxes (fov, slices, window):
+        x0 = None if x is None else resample_physical(x, box_prev, box).to(op.dev)   # warm start by physical position (fixed 2026-10-10)
         xs, conv = pcg(op, y, w, beta, iters, make_window_preconditioner(op, dec, scale), x0, log=log)
         m = dict(nx=nx, B=B, k=k, iters=iters, beta=beta, lam_max=lam_full, eig_cond=float(lam.max() / lam.min()),
                  t_build_s=op.t_build, t_eig_s=round(t_eig, 2), t_lam_s=round(t_lam, 2), t_pcg_s=conv["t_pcg_s"],
@@ -354,6 +382,6 @@ def cascade(y1: torch.Tensor, w1: torch.Tensor, levels: list[dict], eigen_provid
                  peak_gpu_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2) if torch.cuda.is_available() else 0,
                  history=conv["history"], rotations=list(op.rotations))
         log(f"[{nx}] eig {t_eig:.1f} s (cond {m['eig_cond']:.2f}), lam_max {t_lam:.1f} s, PCG {iters} it {conv['t_pcg_s']} s, level {m['t_level_s']} s")
-        vols.append((nx, xs.cpu())); metrics.append(m); x = xs.cpu()
+        vols.append((nx, xs.cpu())); metrics.append(m); x = xs.cpu(); box_prev = box
         del dec, xs, y, w, scale, x0; lv["op"] = None; del op; gc.collect(); torch.cuda.empty_cache()   # free this level before the next
     return vols, metrics
