@@ -118,9 +118,10 @@ class ProjectorSpec:
                                      n_rot=1, dz_rot=0.0, z_mid=geom.z_mid, meta=dict(geom.meta, rotations=rots, dz_rot_model=geom.dz_rot))
         return g, rots
 
-    def build(self, geom: StepAndShootGeometry, devices: list[str] | None = None) -> "RollingWindowOperator":
+    def build(self, geom: StepAndShootGeometry, devices: list[str] | None = None, valid=None) -> "RollingWindowOperator":
+        """valid: optional per-pixel mask of the (binned) detector readings, [n_view, n_u // B, n_v // B] or flat: rays outside it are not in A"""
         g, rots = self.selected(geom)
-        op = RollingWindowOperator(g, self.nx, self.B, self.fov, self.dz_slice, devices, self.cache, self.n_win, self.z_center, mask=self.mask)
+        op = RollingWindowOperator(g, self.nx, self.B, self.fov, self.dz_slice, devices, self.cache, self.n_win, self.z_center, mask=self.mask, valid=valid)
         op.rotations, op.spec = rots, self
         return op
 
@@ -140,7 +141,7 @@ class RollingWindowOperator:
 
     def __init__(self, geom: StepAndShootGeometry, nx: int, B: int, fov: float = 512.0,
                  dz_slice: float = 2.0, devices: list[str] | None = None, cache: str = "column", n_win: int | None = None,
-                 z_center: float | None = None, mask: str | None = None):
+                 z_center: float | None = None, mask: str | None = None, valid=None):
         """n_win: force the window height (slices); default = what the cone covers.  Rotation j is shifted by
         geom.dz_rot which must be a whole number of slices (dz_rot / dz_slice); use :func: first
         if the scan's step is finer than the slice."""
@@ -167,11 +168,11 @@ class RollingWindowOperator:
         b = torch.tensor([-(nx // 2) * vox, -(nx // 2) * vox, z0]).to(self.dev)
         t = time.time()
         if len(self.devices) > 1:
-            self.A = split_voxel_projector(nx, nx, self.n_win, M, b, views, devices=self.devices,
+            self.A = split_voxel_projector(nx, nx, self.n_win, M, b, views, valid=valid, devices=self.devices,
                                            output_device=self.dev, backend="cuda", cache=cache, voxel_mask=mask)
         else:   # the SF kernels launch on the CURRENT device: build (and use) under this projector's device
             with torch.cuda.device(self.dev) if self.dev.type == "cuda" else contextlib.nullcontext():
-                self.A = VoxelProjector3D(nx, nx, self.n_win, M, b, views, device=self.dev, backend="cuda", cache=cache, voxel_mask=mask)
+                self.A = VoxelProjector3D(nx, nx, self.n_win, M, b, views, valid=valid, device=self.dev, backend="cuda", cache=cache, voxel_mask=mask)
         self._sync(); self.t_build = time.time() - t
         self.n_ray = int(self.A.n_ray)
         self.wshape, self.shape = (nx, nx, self.n_win), (nx, nx, self.n_tot)
