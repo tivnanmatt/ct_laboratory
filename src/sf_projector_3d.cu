@@ -498,10 +498,11 @@ __device__ __forceinline__ void sf_column_centre(
 
 __global__ void sf_col_count_kernel(
     int nx, int ny, int nz, const float* __restrict__ M, const float* __restrict__ b,
-    const float* __restrict__ views, int n_view, int64_t* __restrict__ counts)
+    const float* __restrict__ views, int n_view, int64_t* __restrict__ counts, const uint8_t* __restrict__ col_mask)
 {
     const int64_t c = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= (int64_t)nx * ny) return;
+    if (col_mask != nullptr && !col_mask[c]) { counts[c] = 0; return; }          // masked-out column: no entries
     const int i = (int)(c / ny), j = (int)(c % ny);
     float cx, cy, cz; sf_column_centre(M, b, i, j, nz, cx, cy, cz);
     float c0x, c0y, c0z, c1x, c1y, c1z;
@@ -519,10 +520,11 @@ __global__ void sf_col_count_kernel(
 __global__ void sf_col_fill_kernel(
     int nx, int ny, int nz, const float* __restrict__ M, const float* __restrict__ b,
     const float* __restrict__ views, int n_view, const int64_t* __restrict__ ptr,
-    int32_t* __restrict__ col_view, float4* __restrict__ col_trap)
+    int32_t* __restrict__ col_view, float4* __restrict__ col_trap, const uint8_t* __restrict__ col_mask)
 {
     const int64_t c = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= (int64_t)nx * ny) return;
+    if (col_mask != nullptr && !col_mask[c]) return;
     const int i = (int)(c / ny), j = (int)(c % ny);
     float cx, cy, cz; sf_column_centre(M, b, i, j, nz, cx, cy, cz);
     float c0x, c0y, c0z, c1x, c1y, c1z;
@@ -946,15 +948,18 @@ torch::Tensor sf_back_project_3d_csr_cuda(
 // ---------------------------------------------------------------------------
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> sf_precompute_columns_3d_cuda(
     int64_t nx, int64_t ny, int64_t nz,
-    torch::Tensor M, torch::Tensor b, torch::Tensor views, torch::Tensor view_off, torch::Tensor valid)
+    torch::Tensor M, torch::Tensor b, torch::Tensor views, torch::Tensor view_off, torch::Tensor valid, torch::Tensor col_mask)
 {
     sf_check_common(M, b, views, view_off, valid);
     const int n_view = (int)views.size(0);
     const int64_t n_col = nx * ny;
+    const bool has_mask = col_mask.defined() && col_mask.numel() > 0;
+    TORCH_CHECK(!has_mask || (col_mask.is_cuda() && col_mask.dtype() == torch::kUInt8 && col_mask.is_contiguous() && col_mask.numel() == n_col), "col_mask must be CUDA uint8 [nx*ny]");
+    const uint8_t* mask_ptr = has_mask ? col_mask.data_ptr<uint8_t>() : nullptr;
     const int blocks = (int)((n_col + SF_THREADS - 1) / SF_THREADS);
     auto counts = torch::zeros({n_col}, torch::TensorOptions().dtype(torch::kInt64).device(M.device()));
     sf_col_count_kernel<<<blocks, SF_THREADS>>>((int)nx, (int)ny, (int)nz, M.data_ptr<float>(), b.data_ptr<float>(),
-                                                views.data_ptr<float>(), n_view, counts.data_ptr<int64_t>());
+                                                views.data_ptr<float>(), n_view, counts.data_ptr<int64_t>(), mask_ptr);
     auto ptr = torch::zeros({n_col + 1}, counts.options());
     ptr.slice(0, 1, n_col + 1) = torch::cumsum(counts, 0);
     const int64_t nnz = ptr[n_col].item<int64_t>();
@@ -963,7 +968,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> sf_precompute_columns_3d
     if (nnz > 0) {
         sf_col_fill_kernel<<<blocks, SF_THREADS>>>((int)nx, (int)ny, (int)nz, M.data_ptr<float>(), b.data_ptr<float>(),
                                                    views.data_ptr<float>(), n_view, ptr.data_ptr<int64_t>(),
-                                                   cv.data_ptr<int32_t>(), reinterpret_cast<float4*>(ct.data_ptr<float>()));
+                                                   cv.data_ptr<int32_t>(), reinterpret_cast<float4*>(ct.data_ptr<float>()), mask_ptr);
     }
     return std::make_tuple(ptr, cv, ct);
 }

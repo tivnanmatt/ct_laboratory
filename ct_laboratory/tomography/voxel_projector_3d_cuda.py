@@ -117,10 +117,11 @@ def sf_back_project_3d_csr_cuda(sinogram, ptr, idx, w, n_x, n_y, n_z):
 # ---------------------------------------------------------------------------
 # column cache: per transaxial column, culled view list + stored trapezoid
 # ---------------------------------------------------------------------------
-def sf_precompute_columns_3d_cuda(n_x, n_y, n_z, M, b, views, view_off, valid):
+def sf_precompute_columns_3d_cuda(n_x, n_y, n_z, M, b, views, view_off, valid, col_mask=None):
     """Returns ``(col_ptr int64 [n_x*n_y+1], col_view int32 [E], col_trap float32 [E,8])``."""
     M, b, views, view_off, valid = _geometry_args(M, b, views, view_off, valid)
-    return _C.sf_precompute_columns_3d_cuda(int(n_x), int(n_y), int(n_z), M, b, views, view_off, valid)
+    cm = torch.empty(0, dtype=torch.uint8, device=M.device) if col_mask is None else col_mask.to(M.device, torch.uint8).reshape(-1).contiguous()
+    return _C.sf_precompute_columns_3d_cuda(int(n_x), int(n_y), int(n_z), M, b, views, view_off, valid, cm)
 
 
 def sf_forward_project_3d_col_cuda(volume, M, b, views, view_off, valid, col_ptr, col_view, col_trap):

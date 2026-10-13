@@ -103,6 +103,7 @@ class ProjectorSpec:
     rotations: list[int] | None = None       # model rotation indices used (None: all); must be equally spaced
     cache: str = "column"
     z_center: float | None = None            # centre of the (forced) window in mm; None: centre of the cone's z extent
+    mask: str | None = None                  # 'cylinder': reconstruct only the inscribed cylinder (radius fov / 2); the cache holds only those columns
 
     def selected(self, geom: StepAndShootGeometry) -> tuple[StepAndShootGeometry, list[int]]:
         """(geometry restricted to the selected rotations, their indices into the sinogram rows)"""
@@ -119,17 +120,17 @@ class ProjectorSpec:
 
     def build(self, geom: StepAndShootGeometry, devices: list[str] | None = None) -> "RollingWindowOperator":
         g, rots = self.selected(geom)
-        op = RollingWindowOperator(g, self.nx, self.B, self.fov, self.dz_slice, devices, self.cache, self.n_win, self.z_center)
+        op = RollingWindowOperator(g, self.nx, self.B, self.fov, self.dz_slice, devices, self.cache, self.n_win, self.z_center, mask=self.mask)
         op.rotations, op.spec = rots, self
         return op
 
     def to_dict(self) -> dict:
         return dict(geometry_id=self.geometry_id, nx=self.nx, B=self.B, dz_slice=self.dz_slice, fov=self.fov, n_win=self.n_win,
-                    rotations=self.rotations, cache=self.cache, z_center=self.z_center)
+                    rotations=self.rotations, cache=self.cache, z_center=self.z_center, mask=self.mask)
 
     @classmethod
     def from_dict(cls, d: dict) -> "ProjectorSpec":
-        return cls(**{k: d[k] for k in ("geometry_id", "nx", "B", "dz_slice", "fov", "n_win", "rotations", "cache", "z_center") if k in d})
+        return cls(**{k: d[k] for k in ("geometry_id", "nx", "B", "dz_slice", "fov", "n_win", "rotations", "cache", "z_center", "mask") if k in d})
 
 
 # ------------------------------------------------------------------ operator
@@ -139,11 +140,11 @@ class RollingWindowOperator:
 
     def __init__(self, geom: StepAndShootGeometry, nx: int, B: int, fov: float = 512.0,
                  dz_slice: float = 2.0, devices: list[str] | None = None, cache: str = "column", n_win: int | None = None,
-                 z_center: float | None = None):
+                 z_center: float | None = None, mask: str | None = None):
         """n_win: force the window height (slices); default = what the cone covers.  Rotation j is shifted by
         geom.dz_rot which must be a whole number of slices (dz_rot / dz_slice); use :func: first
         if the scan's step is finer than the slice."""
-        self.geom, self.nx, self.B, self.fov, self.dz = geom, nx, B, fov, dz_slice
+        self.geom, self.nx, self.B, self.fov, self.dz, self.mask = geom, nx, B, fov, dz_slice, mask
         step = geom.dz_rot / dz_slice if geom.n_rot > 1 else 1.0
         assert abs(step - round(step)) < 1e-6 and round(step) >= 1, f"rotation step {geom.dz_rot} mm must be a multiple of the slice {dz_slice} mm"
         self.step = int(round(step))
@@ -167,10 +168,10 @@ class RollingWindowOperator:
         t = time.time()
         if len(self.devices) > 1:
             self.A = split_voxel_projector(nx, nx, self.n_win, M, b, views, devices=self.devices,
-                                           output_device=self.dev, backend="cuda", cache=cache)
+                                           output_device=self.dev, backend="cuda", cache=cache, voxel_mask=mask)
         else:   # the SF kernels launch on the CURRENT device: build (and use) under this projector's device
             with torch.cuda.device(self.dev) if self.dev.type == "cuda" else contextlib.nullcontext():
-                self.A = VoxelProjector3D(nx, nx, self.n_win, M, b, views, device=self.dev, backend="cuda", cache=cache)
+                self.A = VoxelProjector3D(nx, nx, self.n_win, M, b, views, device=self.dev, backend="cuda", cache=cache, voxel_mask=mask)
         self._sync(); self.t_build = time.time() - t
         self.n_ray = int(self.A.n_ray)
         self.wshape, self.shape = (nx, nx, self.n_win), (nx, nx, self.n_tot)
@@ -321,7 +322,8 @@ class RollingWindowOperator:
 
     def describe(self) -> dict:
         return dict(nx=self.nx, B=self.B, n_win=self.n_win, n_tot=self.n_tot, n_rot=self.R, n_view=self.geom.n_view,
-                    n_ray=self.n_ray, vox_mm=self.vox, z0_mm=self.z0, devices=self.devices, t_build_s=round(self.t_build, 2))
+                    n_ray=self.n_ray, vox_mm=self.vox, z0_mm=self.z0, devices=self.devices, t_build_s=round(self.t_build, 2), mask=self.mask,
+                    n_param=int(getattr(self.A, "n_param", self.nx * self.nx * self.n_win)))
 
 
 # ------------------------------------------------------------------ data

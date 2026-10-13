@@ -57,7 +57,17 @@ from .voxel_projector_3d_torch import (
 )
 from .voxel_projector_3d_autograd import VoxelProjector3DFunction
 
-__all__ = ["VoxelProjector3D", "make_views", "views_from_module_orientations"]
+__all__ = ["VoxelProjector3D", "make_views", "views_from_module_orientations", "cylinder_mask"]
+
+
+def cylinder_mask(n_x: int, n_y: int, M: torch.Tensor, b: torch.Tensor, radius: float | None = None, center=(0.0, 0.0)) -> torch.Tensor:
+    """``[n_x, n_y]`` bool: columns whose centre lies within ``radius`` (default: the inscribed circle of the grid) of ``center`` in world x, y"""
+    M = M.reshape(-1)[:9].to(torch.float64).cpu(); b = b.reshape(-1)[:3].to(torch.float64).cpu()
+    i = torch.arange(n_x, dtype=torch.float64); j = torch.arange(n_y, dtype=torch.float64); I, J = torch.meshgrid(i, j, indexing="ij")
+    x = M[0] * I + M[1] * J + b[0]; y = M[3] * I + M[4] * J + b[1]
+    if radius is None:
+        radius = 0.5 * min(float(n_x) * float(torch.sqrt(M[0] ** 2 + M[3] ** 2)), float(n_y) * float(torch.sqrt(M[1] ** 2 + M[4] ** 2)))
+    return (torch.hypot(x - center[0], y - center[1]) <= radius)
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +163,10 @@ class VoxelProjector3D(Projector3D):
     """
 
     def __init__(self, n_x, n_y, n_z, M, b, views, valid=None,
-                 device=None, precompute_footprints=False, backend="cuda", cache="none"):
+                 device=None, precompute_footprints=False, backend="cuda", cache="none", voxel_mask=None):
+        """voxel_mask: optional ``[n_x, n_y]`` bool (per transaxial column, every slice) or ``'cylinder'`` (columns whose centre lies within the
+        inscribed circle of the grid) -> the column cache holds only the masked-in columns, masked-out voxels are zero on the forward
+        projection and ignored on the back projection, and :attr:`n_param` / :meth:`extract` / :meth:`embed` give the in-mask parameter vector."""
         super().__init__()
         if backend not in ("cuda", "torch"):
             raise ValueError(f"backend must be 'cuda' or 'torch', got {backend!r}")
@@ -194,6 +207,10 @@ class VoxelProjector3D(Projector3D):
         self.register_buffer("views", views)
         self.register_buffer("view_off", view_off)
         self.register_buffer("valid", valid_t)
+        if isinstance(voxel_mask, str):
+            assert voxel_mask == "cylinder", "voxel_mask: a [n_x, n_y] bool tensor or 'cylinder'"
+            voxel_mask = cylinder_mask(self.n_x, self.n_y, M, b)
+        self.register_buffer("col_mask", torch.empty(0, dtype=torch.uint8) if voxel_mask is None else voxel_mask.to(torch.uint8).reshape(self.n_x * self.n_y).contiguous())
         self.register_buffer("fp_ptr", None)
         self.register_buffer("fp_idx", None)
         self.register_buffer("fp_w", None)
@@ -212,6 +229,42 @@ class VoxelProjector3D(Projector3D):
     @property
     def kind(self) -> str:
         return "voxel"
+
+    # ------------------------------------------------------- voxel mask / parameter vector
+    @property
+    def has_mask(self) -> bool:
+        return self.col_mask.numel() > 0
+
+    @property
+    def mask3d(self) -> torch.Tensor:
+        """``[n_x, n_y, n_z]`` bool: the voxels of the parameter vector (all when there is no mask)"""
+        if not self.has_mask:
+            return torch.ones((self.n_x, self.n_y, self.n_z), dtype=torch.bool, device=self.M.device)
+        return self.col_mask.view(self.n_x, self.n_y, 1).expand(self.n_x, self.n_y, self.n_z).bool()
+
+    @property
+    def n_param(self) -> int:
+        """number of voxels in the mask (the unknowns of a reconstruction on this projector)"""
+        return int(self.col_mask.sum()) * self.n_z if self.has_mask else self.n_x * self.n_y * self.n_z
+
+    @property
+    def mask_indices(self) -> torch.Tensor:
+        """flat indices (``[n_x, n_y, n_z]`` order) of the masked-in voxels"""
+        return torch.nonzero(self.mask3d.reshape(-1), as_tuple=False).reshape(-1)
+
+    def extract(self, volume: torch.Tensor) -> torch.Tensor:
+        """``[n_x, n_y, n_z] -> [n_param]``: the parameter vector of a volume"""
+        return volume.reshape(-1) if not self.has_mask else volume.reshape(-1)[self.mask_indices]
+
+    def embed(self, params: torch.Tensor) -> torch.Tensor:
+        """``[n_param] -> [n_x, n_y, n_z]``: zero outside the mask"""
+        if not self.has_mask:
+            return params.reshape(self.n_x, self.n_y, self.n_z)
+        out = torch.zeros(self.n_x * self.n_y * self.n_z, dtype=params.dtype, device=params.device); out[self.mask_indices] = params
+        return out.reshape(self.n_x, self.n_y, self.n_z)
+
+    def apply_mask(self, volume: torch.Tensor) -> torch.Tensor:
+        return volume if not self.has_mask else volume * self.mask3d.to(volume.dtype)
 
     @property
     def n_view(self) -> int:
@@ -288,7 +341,8 @@ class VoxelProjector3D(Projector3D):
         device = torch.device(device)
         with torch.cuda.device(device) if device.type == "cuda" else contextlib.nullcontext():
             valid = self.valid if self.valid.numel() else None
-            op = VoxelProjector3D(self.n_x, self.n_y, self.n_z, self.M, self.b, self.views, valid=valid, device=device, backend=self.backend, cache="none")
+            op = VoxelProjector3D(self.n_x, self.n_y, self.n_z, self.M, self.b, self.views, valid=valid, device=device, backend=self.backend, cache="none",
+                                  voxel_mask=self.col_mask.view(self.n_x, self.n_y).bool() if self.has_mask else None)
             for k in ("fp_ptr", "fp_idx", "fp_w", "col_ptr", "col_view", "col_trap"):
                 t = getattr(self, k)
                 if t is not None: setattr(op, k, t.to(device))
@@ -307,7 +361,8 @@ class VoxelProjector3D(Projector3D):
         d = torch.load(path, map_location="cpu", weights_only=False)
         assert d.get("format", "").startswith("ct_laboratory.VoxelProjector3D/"), f"{path} is not a saved VoxelProjector3D"
         b = d["buffers"]; valid = b["valid"] if b["valid"] is not None and b["valid"].numel() else None
-        op = cls(d["n_x"], d["n_y"], d["n_z"], b["M"], b["b"], b["views"], valid=valid, device=device, backend=d["backend"], cache="none")
+        cm = b.get("col_mask"); vm = cm.view(d["n_x"], d["n_y"]).bool() if cm is not None and cm.numel() else None
+        op = cls(d["n_x"], d["n_y"], d["n_z"], b["M"], b["b"], b["views"], valid=valid, device=device, backend=d["backend"], cache="none", voxel_mask=vm)
         for k in ("fp_ptr", "fp_idx", "fp_w", "col_ptr", "col_view", "col_trap"):
             if b.get(k) is not None: setattr(op, k, b[k].to(op.M.device))
         op.meta = d.get("meta", {}); return op
@@ -328,7 +383,7 @@ class VoxelProjector3D(Projector3D):
         if self.backend != "cuda":
             raise NotImplementedError("the column cache is implemented for backend='cuda' only")
         ptr, cv, ct = sf_precompute_columns_3d_cuda(
-            self.n_x, self.n_y, self.n_z, self.M, self.b, self.views, self.view_off, self.valid)
+            self.n_x, self.n_y, self.n_z, self.M, self.b, self.views, self.view_off, self.valid, self.col_mask if self.has_mask else None)
         self.col_ptr, self.col_view, self.col_trap = ptr, cv, ct
         return self.column_entries
 
@@ -348,6 +403,8 @@ class VoxelProjector3D(Projector3D):
         whole batch; no autograd graph); everything else is :meth:`forward`."""
         if volume.dim() == 4 and volume.shape[0] > 1 and self.fused_available:
             return self.forward_project_batched(volume)
+        if self.has_mask and not self.has_columns:                            # column cache: masked columns have no entries; other paths mask here
+            volume = self.apply_mask(volume)
         return self.forward(volume)
 
     # ------------------------------------------------- fused batched / rolled projection (column cache, CUDA backend)
@@ -427,12 +484,14 @@ class VoxelProjector3D(Projector3D):
         cuda = self.backend == "cuda"
         if self.has_footprints:
             fn = sf_back_project_3d_csr_cuda if cuda else sf_back_project_3d_csr_torch
-            return fn(sinogram, self.fp_ptr, self.fp_idx, self.fp_w, self.n_x, self.n_y, self.n_z)
+            out = fn(sinogram, self.fp_ptr, self.fp_idx, self.fp_w, self.n_x, self.n_y, self.n_z)
+            return self.apply_mask(out) if self.has_mask else out
         if self.has_columns:
             return sf_back_project_3d_col_cuda(sinogram, self.M, self.b, self.views, self.view_off, self.valid,
                                                self.col_ptr, self.col_view, self.col_trap, self.n_x, self.n_y, self.n_z)
         fn = sf_back_project_3d_cuda if cuda else sf_back_project_3d_torch
-        return fn(sinogram, self.M, self.b, self.views, self.view_off, self.valid, self.n_x, self.n_y, self.n_z)
+        out = fn(sinogram, self.M, self.b, self.views, self.view_off, self.valid, self.n_x, self.n_y, self.n_z)
+        return self.apply_mask(out) if self.has_mask else out
 
     # ------------------------------------------------------------- utility
     def sinogram_view(self, sino: torch.Tensor) -> torch.Tensor:
