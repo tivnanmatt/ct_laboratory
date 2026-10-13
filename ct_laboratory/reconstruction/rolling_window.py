@@ -180,18 +180,50 @@ class RollingWindowOperator:
             if d.startswith("cuda"):
                 torch.cuda.synchronize(d)
 
-    # rolling application over rotations: rotation j sees slices [j, j+n_win)
+    # rolling application over rotations: rotation j sees slices [j*step, j*step + n_win) of the volume.  With the fused column-cache
+    # kernels (single GPU, VoxelProjector3D with cache='column') the rotations go through the projector in chunks of `chunk`: each voxel's
+    # footprint is computed once per chunk instead of once per rotation.  The volume is sized so every window lies inside it; the kernels
+    # zero-pad anything outside and never wrap.  Multi-GPU or other caches: one window at a time (same result).
+    chunk = 16
+
+    @property
+    def fused(self) -> bool:
+        return len(self.devices) == 1 and bool(getattr(self.A, "fused_available", False))
+
     def fwd(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.stack([self.A.forward_project(x[..., j * self.step:j * self.step + self.n_win].contiguous()) for j in range(self.R)])
+        if not self.fused:
+            return torch.stack([self.A.forward_project(x[..., j * self.step:j * self.step + self.n_win].contiguous()) for j in range(self.R)])
+        x = x.contiguous(); out = torch.empty((self.R, self.n_ray), device=self.dev)
+        for j0 in range(0, self.R, self.chunk):
+            j1 = min(j0 + self.chunk, self.R); out[j0:j1] = self.A.forward_project_rolled(x, j1 - j0, z0=j0 * self.step, zstep=self.step)
+        return out
 
     def adj(self, y: torch.Tensor) -> torch.Tensor:
         out = torch.zeros(self.shape, device=self.dev)
-        for j in range(self.R):
-            out[..., j * self.step:j * self.step + self.n_win] += self.A.back_project(y[j]).reshape(self.wshape)
+        if not self.fused:
+            for j in range(self.R):
+                out[..., j * self.step:j * self.step + self.n_win] += self.A.back_project(y[j]).reshape(self.wshape)
+            return out
+        for j0 in range(0, self.R, self.chunk):
+            j1 = min(j0 + self.chunk, self.R); self.A.back_project_rolled(y[j0:j1].contiguous(), out, z0=j0 * self.step, zstep=self.step)
         return out
 
     def normal(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-        """A^T diag(w) A x, streamed per rotation (no [R, n_ray] intermediate)."""
+        """A^T diag(w) A x, streamed per chunk of rotations (no [R, n_ray] intermediate)."""
+        out = torch.zeros(self.shape, device=self.dev)
+        if not self.fused:
+            for j in range(self.R):
+                t = self.A.forward_project(x[..., j * self.step:j * self.step + self.n_win].contiguous()); t.mul_(w[j])
+                out[..., j * self.step:j * self.step + self.n_win] += self.A.back_project(t).reshape(self.wshape)
+            return out
+        x = x.contiguous()
+        for j0 in range(0, self.R, self.chunk):
+            j1 = min(j0 + self.chunk, self.R); t = self.A.forward_project_rolled(x, j1 - j0, z0=j0 * self.step, zstep=self.step); t.mul_(w[j0:j1])
+            self.A.back_project_rolled(t, out, z0=j0 * self.step, zstep=self.step)
+        return out
+
+    def normal_loop(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+        """the per-rotation version of :meth:`normal` (reference / timing)"""
         out = torch.zeros(self.shape, device=self.dev)
         for j in range(self.R):
             t = self.A.forward_project(x[..., j * self.step:j * self.step + self.n_win].contiguous()); t.mul_(w[j])

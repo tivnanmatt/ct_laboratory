@@ -89,6 +89,11 @@ torch::Tensor sf_forward_project_3d_col_cuda(torch::Tensor volume, torch::Tensor
 torch::Tensor sf_back_project_3d_col_cuda(torch::Tensor sino, torch::Tensor M, torch::Tensor b, torch::Tensor views, torch::Tensor view_off, torch::Tensor valid,
     torch::Tensor col_ptr, torch::Tensor col_view, torch::Tensor col_trap, int64_t nx, int64_t ny, int64_t nz);
 
+torch::Tensor sf_forward_project_3d_col_fused_cuda(torch::Tensor volume, int64_t batch, int64_t nz_win, int64_t z0, int64_t zstep,
+    torch::Tensor M, torch::Tensor b, torch::Tensor views, torch::Tensor view_off, torch::Tensor valid, torch::Tensor col_ptr, torch::Tensor col_view, torch::Tensor col_trap);
+torch::Tensor sf_back_project_3d_col_fused_cuda(torch::Tensor sino, torch::Tensor out, int64_t nx, int64_t ny, int64_t nz_win, int64_t z0, int64_t zstep,
+    torch::Tensor M, torch::Tensor b, torch::Tensor views, torch::Tensor view_off, torch::Tensor valid, torch::Tensor col_ptr, torch::Tensor col_view, torch::Tensor col_trap);
+
 
 /* ========================================================================== */
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -148,4 +153,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "SF forward projection using the column cache");
     m.def("sf_back_project_3d_col_cuda", &sf_back_project_3d_col_cuda,
           "SF back projection using the column cache");
+    m.def("sf_forward_project_3d_col_fused_cuda", &sf_forward_project_3d_col_fused_cuda,
+          "SF forward projection, column cache, one footprint per voxel for a batch (stack [B,X,Y,Z]) or rolled windows ([X,Y,Z_tot])");
+    m.def("sf_back_project_3d_col_fused_cuda", &sf_back_project_3d_col_fused_cuda,
+          "SF back projection, column cache, fused over a batch (stack) or rolled windows accumulated into out");
 }

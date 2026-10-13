@@ -45,6 +45,9 @@ from .voxel_projector_3d_cuda import (
     sf_back_project_3d_csr_cuda,
     sf_precompute_columns_3d_cuda,
     sf_back_project_3d_col_cuda,
+    sf_forward_project_3d_col_fused_cuda,
+    sf_back_project_3d_col_fused_cuda,
+    SF_MAXB,
 )
 from .voxel_projector_3d_torch import (
     sf_back_project_3d_torch,
@@ -329,11 +332,83 @@ class VoxelProjector3D(Projector3D):
             self.col_ptr, self.col_view, self.col_trap)
 
     def forward_project(self, volume: torch.Tensor) -> torch.Tensor:
+        """A batch ``[B, X, Y, Z]`` goes through the fused kernel when the column cache is available (one footprint per voxel for the
+        whole batch; no autograd graph); everything else is :meth:`forward`."""
+        if volume.dim() == 4 and volume.shape[0] > 1 and self.fused_available:
+            return self.forward_project_batched(volume)
         return self.forward(volume)
 
+    # ------------------------------------------------- fused batched / rolled projection (column cache, CUDA backend)
+    @property
+    def fused_available(self) -> bool:
+        return self.backend == "cuda" and self.has_columns
+
+    def _fused_args(self):
+        return (self.M, self.b, self.views, self.view_off, self.valid, self.col_ptr, self.col_view, self.col_trap)
+
+    def forward_project_batched(self, volumes: torch.Tensor) -> torch.Tensor:
+        """``[B, X, Y, Z] -> [B, n_pix]``: the same projector applied to every volume, with each voxel's footprint computed once for the
+        whole batch (chunks of SF_MAXB).  Falls back to one projection per volume without the column cache."""
+        volumes = volumes.contiguous()
+        if not self.fused_available:
+            return torch.stack([self.forward(v) for v in volumes])
+        out = torch.empty((volumes.shape[0], self.n_pix), device=volumes.device, dtype=torch.float32)
+        for b0 in range(0, volumes.shape[0], SF_MAXB):
+            out[b0:b0 + SF_MAXB] = sf_forward_project_3d_col_fused_cuda(volumes[b0:b0 + SF_MAXB], *self._fused_args())
+        return out
+
+    def back_project_batched(self, sinograms: torch.Tensor) -> torch.Tensor:
+        """``[B, n_pix] -> [B, X, Y, Z]``, the adjoint of :meth:`forward_project_batched`."""
+        sinograms = sinograms.contiguous()
+        if not self.fused_available:
+            return torch.stack([self.back_project(y) for y in sinograms])
+        out = torch.empty((sinograms.shape[0], self.n_x, self.n_y, self.n_z), device=sinograms.device, dtype=torch.float32)
+        for b0 in range(0, sinograms.shape[0], SF_MAXB):
+            out[b0:b0 + SF_MAXB] = sf_back_project_3d_col_fused_cuda(sinograms[b0:b0 + SF_MAXB], *self._fused_args(), self.n_x, self.n_y, self.n_z)
+        return out
+
+    def forward_project_rolled(self, volume: torch.Tensor, batch: int, z0: int = 0, zstep: int = 1) -> torch.Tensor:
+        """Multi-rotation hook.  ``volume [X, Y, Z_tot]``; element ``i`` of the batch is this projector applied to the window of
+        slices ``[z0 + i*zstep, z0 + i*zstep + Z)``.  Slices outside the volume are zero (padding; never wrapped).  Returns
+        ``[batch, n_pix]``.  One footprint per window voxel serves the whole batch (chunks of SF_MAXB)."""
+        volume = volume.contiguous()
+        assert volume.dim() == 3 and tuple(volume.shape[:2]) == (self.n_x, self.n_y), "volume must be [X, Y, Z_tot]"
+        if not self.fused_available:                                         # same semantics, one window at a time
+            nt = volume.shape[2]; outs = []
+            for i in range(batch):
+                a0 = z0 + i * zstep; win = torch.zeros((self.n_x, self.n_y, self.n_z), device=volume.device, dtype=torch.float32)
+                lo, hi = max(a0, 0), min(a0 + self.n_z, nt)
+                if hi > lo: win[..., lo - a0:hi - a0] = volume[..., lo:hi]
+                outs.append(self.forward(win))
+            return torch.stack(outs)
+        out = torch.empty((batch, self.n_pix), device=volume.device, dtype=torch.float32)
+        for b0 in range(0, batch, SF_MAXB):
+            nb = min(SF_MAXB, batch - b0)
+            out[b0:b0 + nb] = sf_forward_project_3d_col_fused_cuda(volume, *self._fused_args(), batch=nb, nz_win=self.n_z, z0=z0 + b0 * zstep, zstep=zstep)
+        return out
+
+    def back_project_rolled(self, sinograms: torch.Tensor, out: torch.Tensor, z0: int = 0, zstep: int = 1) -> torch.Tensor:
+        """Adjoint of :meth:`forward_project_rolled`: the back projection of element ``i`` is ADDED to slices
+        ``[z0 + i*zstep, + Z)`` of ``out [X, Y, Z_tot]`` (slices outside ``out`` are dropped, never wrapped).  Returns ``out``."""
+        sinograms = sinograms.contiguous()
+        assert out.dim() == 3 and tuple(out.shape[:2]) == (self.n_x, self.n_y) and out.is_contiguous(), "out must be a contiguous [X, Y, Z_tot]"
+        if not self.fused_available:
+            nt = out.shape[2]
+            for i in range(sinograms.shape[0]):
+                a0 = z0 + i * zstep; lo, hi = max(a0, 0), min(a0 + self.n_z, nt)
+                if hi > lo: out[..., lo:hi] += self.back_project(sinograms[i]).reshape(self.n_x, self.n_y, self.n_z)[..., lo - a0:hi - a0]
+            return out
+        for b0 in range(0, sinograms.shape[0], SF_MAXB):
+            nb = min(SF_MAXB, sinograms.shape[0] - b0)
+            sf_back_project_3d_col_fused_cuda(sinograms[b0:b0 + nb], *self._fused_args(), self.n_x, self.n_y, self.n_z, out=out, z0=z0 + b0 * zstep, zstep=zstep)
+        return out
+
     def back_project(self, sinogram: torch.Tensor) -> torch.Tensor:
-        """Exact adjoint of :meth:`forward_project` (no autograd graph)."""
+        """Exact adjoint of :meth:`forward_project` (no autograd graph).  A batch ``[B, n_pix]`` goes through the fused kernel when the
+        column cache is available (one footprint per voxel for the whole batch)."""
         sinogram = sinogram.contiguous()
+        if sinogram.dim() == 2 and sinogram.shape[0] > 1 and self.fused_available:
+            return self.back_project_batched(sinogram)
         cuda = self.backend == "cuda"
         if self.has_footprints:
             fn = sf_back_project_3d_csr_cuda if cuda else sf_back_project_3d_csr_torch

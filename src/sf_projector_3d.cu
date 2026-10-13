@@ -652,6 +652,135 @@ __global__ void sf_back_col_kernel(
     vol[gid] = acc;
 }
 
+
+// ===========================================================================
+// FUSED column-cache kernels: one footprint, many batch elements
+// ===========================================================================
+// The plain column kernels above own one (batch element, voxel) pair per thread,
+// so a batch of B volumes recomputes every footprint B times.  Here one thread
+// owns one WINDOW voxel (i, j, k), computes its footprint ONCE and applies it to
+// up to SF_MAXB batch elements.  Batch element bi reads / writes the voxel at
+//     vol[bi * bstride + (i * ny + j) * zstride + (k + z0 + bi * zstep)]
+// which covers two layouts without any copy:
+//   stack   vol [B, nx, ny, nz]   : bstride = nx*ny*nz, zstride = nz,    z0 = 0, zstep = 0
+//   rolled  vol [nx, ny, n_tot]   : bstride = 0,        zstride = n_tot, z0, zstep = slices between consecutive elements
+// The rolled layout is the multi-rotation (step-and-shoot) projector: element bi
+// is the window of rotation bi, slices [z0 + bi*zstep, z0 + bi*zstep + nz).
+// A slice index outside [0, zdim) reads as ZERO on the forward projection and is
+// skipped on the back projection: zero padding, the volume is NEVER wrapped.
+// Rolled windows overlap, so the rolled back projection accumulates with
+// atomicAdd into a caller-provided volume; the stack back projection stores.
+#define SF_MAXB 16
+
+struct SFBatchMap { int64_t bstride; int zstride; int zdim; int z0; int zstep; };
+
+__device__ __forceinline__ int64_t sf_batch_index(const SFBatchMap& m, int bi, int64_t c, int k, bool& ok)
+{
+    const int kz = k + m.z0 + bi * m.zstep;
+    ok = (kz >= 0) && (kz < m.zdim);
+    return (int64_t)bi * m.bstride + c * (int64_t)m.zstride + (int64_t)kz;
+}
+
+__global__ void sf_forward_col_fused_kernel(
+    const float* __restrict__ vol, SFBatchMap map, int batch, int nx, int ny, int nz,
+    const float* __restrict__ M, const float* __restrict__ b,
+    const float* __restrict__ views, const int64_t* __restrict__ view_off,
+    const uint8_t* __restrict__ valid, int has_valid,
+    const int64_t* __restrict__ col_ptr, const int32_t* __restrict__ col_view, const float4* __restrict__ col_trap,
+    float* __restrict__ sino, int64_t n_pix)
+{
+    const int64_t n_vox = (int64_t)nx * ny * nz;
+    const int64_t v = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (v >= n_vox) return;
+    const int64_t c = v / nz; const int k = (int)(v % nz);
+    float vals[SF_MAXB]; bool any = false;
+#pragma unroll
+    for (int bi = 0; bi < SF_MAXB; ++bi) {
+        if (bi < batch) { bool ok; const int64_t idx = sf_batch_index(map, bi, c, k, ok); vals[bi] = ok ? vol[idx] : 0.f; any = any || (vals[bi] != 0.f); }
+        else vals[bi] = 0.f;
+    }
+    if (!any) return;
+    const int i = (int)(c / ny), j = (int)(c % ny);
+    float cx, cy, cz; sf_voxel_centre(M, b, i, j, k, cx, cy, cz);
+    SF_VOXEL_EDGES(M)
+    const float fk = (nz > 1) ? (float)k / (float)(nz - 1) : 0.f;
+    const int64_t e0 = col_ptr[c], e1 = col_ptr[c + 1];
+    for (int64_t e = e0; e < e1; ++e) {
+        const int w = col_view[e];
+        SFView V = sf_load_view(views, w);
+        SFFootprint F;
+        if (!sf_col_voxel(V, col_trap[2 * e], col_trap[2 * e + 1], fk, cx, cy, cz, exx, exy, exz, eyx, eyy, eyz, ezx, ezy, ezz, lx, ly, lz, F)) continue;
+        const int64_t off = view_off[w];
+        for (int iu = F.iu0; iu <= F.iu1; ++iu) {
+            float wu = sf_trap_int((float)iu, (float)iu + 1.f, F.t0, F.t1, F.t2, F.t3);
+            if (wu <= 0.f) continue;
+            for (int iv = F.iv0; iv <= F.iv1; ++iv) {
+                float wv = sf_rect_int((float)iv, (float)iv + 1.f, F.r0, F.r1);
+                if (wv <= 0.f) continue;
+                int64_t pidx = off + (int64_t)iu * V.nv + iv;
+                if (has_valid && !valid[pidx]) continue;
+                const float wgt = F.amp * wu * wv;
+#pragma unroll
+                for (int bi = 0; bi < SF_MAXB; ++bi) {
+                    if (bi < batch && vals[bi] != 0.f) atomicAdd(&sino[(int64_t)bi * n_pix + pidx], vals[bi] * wgt);
+                }
+            }
+        }
+    }
+}
+
+__global__ void sf_back_col_fused_kernel(
+    const float* __restrict__ sino, SFBatchMap map, int batch, int atomic_out, int nx, int ny, int nz,
+    const float* __restrict__ M, const float* __restrict__ b,
+    const float* __restrict__ views, const int64_t* __restrict__ view_off,
+    const uint8_t* __restrict__ valid, int has_valid,
+    const int64_t* __restrict__ col_ptr, const int32_t* __restrict__ col_view, const float4* __restrict__ col_trap,
+    float* __restrict__ vol, int64_t n_pix)
+{
+    const int64_t n_vox = (int64_t)nx * ny * nz;
+    const int64_t v = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (v >= n_vox) return;
+    const int64_t c = v / nz; const int k = (int)(v % nz);
+    const int i = (int)(c / ny), j = (int)(c % ny);
+    float cx, cy, cz; sf_voxel_centre(M, b, i, j, k, cx, cy, cz);
+    SF_VOXEL_EDGES(M)
+    const float fk = (nz > 1) ? (float)k / (float)(nz - 1) : 0.f;
+    float acc[SF_MAXB];
+#pragma unroll
+    for (int bi = 0; bi < SF_MAXB; ++bi) acc[bi] = 0.f;
+    const int64_t e0 = col_ptr[c], e1 = col_ptr[c + 1];
+    for (int64_t e = e0; e < e1; ++e) {
+        const int w = col_view[e];
+        SFView V = sf_load_view(views, w);
+        SFFootprint F;
+        if (!sf_col_voxel(V, col_trap[2 * e], col_trap[2 * e + 1], fk, cx, cy, cz, exx, exy, exz, eyx, eyy, eyz, ezx, ezy, ezz, lx, ly, lz, F)) continue;
+        const int64_t off = view_off[w];
+        for (int iu = F.iu0; iu <= F.iu1; ++iu) {
+            float wu = sf_trap_int((float)iu, (float)iu + 1.f, F.t0, F.t1, F.t2, F.t3);
+            if (wu <= 0.f) continue;
+            for (int iv = F.iv0; iv <= F.iv1; ++iv) {
+                float wv = sf_rect_int((float)iv, (float)iv + 1.f, F.r0, F.r1);
+                if (wv <= 0.f) continue;
+                int64_t pidx = off + (int64_t)iu * V.nv + iv;
+                if (has_valid && !valid[pidx]) continue;
+                const float wgt = F.amp * wu * wv;
+                const float* sp = sino + pidx;
+#pragma unroll
+                for (int bi = 0; bi < SF_MAXB; ++bi) {
+                    if (bi < batch) acc[bi] += sp[(int64_t)bi * n_pix] * wgt;
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int bi = 0; bi < SF_MAXB; ++bi) {
+        if (bi >= batch) break;
+        bool ok; const int64_t idx = sf_batch_index(map, bi, c, k, ok);
+        if (!ok) continue;
+        if (atomic_out) atomicAdd(&vol[idx], acc[bi]); else vol[idx] = acc[bi];
+    }
+}
+
 // ===========================================================================
 // Host wrappers
 // ===========================================================================
@@ -878,6 +1007,77 @@ torch::Tensor sf_back_project_3d_col_cuda(
     const int has_valid = valid.numel() > 0 ? 1 : 0;
     sf_back_col_kernel<<<blocks, SF_THREADS>>>(
         sino.data_ptr<float>(), (int)batch, (int)nx, (int)ny, (int)nz, M.data_ptr<float>(), b.data_ptr<float>(),
+        views.data_ptr<float>(), view_off.data_ptr<int64_t>(), has_valid ? valid.data_ptr<uint8_t>() : nullptr, has_valid,
+        col_ptr.data_ptr<int64_t>(), col_view.data_ptr<int32_t>(), reinterpret_cast<const float4*>(col_trap.data_ptr<float>()),
+        vol.data_ptr<float>(), n_pix);
+    return vol;
+}
+
+
+// ---------------------------------------------------------------------------
+// fused (batched / rolled) column-cache wrappers
+// ---------------------------------------------------------------------------
+// volume [B, nx, ny, nz]  -> stack mode (batch = B)
+// volume [nx, ny, n_tot]  -> rolled mode: `batch` windows of `nz_win` slices, window bi = slices [z0 + bi*zstep, ...)
+// slices outside the volume are zero (no wraparound).  Returns sino [batch, n_pix].
+torch::Tensor sf_forward_project_3d_col_fused_cuda(
+    torch::Tensor volume, int64_t batch, int64_t nz_win, int64_t z0, int64_t zstep,
+    torch::Tensor M, torch::Tensor b, torch::Tensor views, torch::Tensor view_off, torch::Tensor valid,
+    torch::Tensor col_ptr, torch::Tensor col_view, torch::Tensor col_trap)
+{
+    TORCH_CHECK(volume.is_cuda() && volume.dtype() == torch::kFloat32 && volume.is_contiguous(), "volume must be CUDA float32 contiguous");
+    sf_check_common(M, b, views, view_off, valid);
+    int64_t nx, ny, nz; SFBatchMap map;
+    if (volume.dim() == 4) {
+        batch = volume.size(0); nx = volume.size(1); ny = volume.size(2); nz = volume.size(3);
+        map.bstride = nx * ny * nz; map.zstride = (int)nz; map.zdim = (int)nz; map.z0 = 0; map.zstep = 0;
+    } else if (volume.dim() == 3) {
+        nx = volume.size(0); ny = volume.size(1); const int64_t n_tot = volume.size(2); nz = nz_win;
+        TORCH_CHECK(nz >= 1 && batch >= 1, "rolled mode needs nz_win >= 1 and batch >= 1");
+        map.bstride = 0; map.zstride = (int)n_tot; map.zdim = (int)n_tot; map.z0 = (int)z0; map.zstep = (int)zstep;
+    } else TORCH_CHECK(false, "volume must be [B,X,Y,Z] (stack) or [X,Y,Z_tot] (rolled)");
+    TORCH_CHECK(batch >= 1 && batch <= SF_MAXB, "batch must be 1..", SF_MAXB, " per launch (chunk larger batches)");
+    sf_check_cols(col_ptr, col_view, col_trap, nx * ny);
+    const int64_t n_pix = sf_n_pix(view_off);
+    auto sino = torch::zeros({batch, n_pix}, volume.options());
+    const int64_t total = nx * ny * nz;
+    const int blocks = (int)((total + SF_THREADS - 1) / SF_THREADS);
+    const int has_valid = valid.numel() > 0 ? 1 : 0;
+    sf_forward_col_fused_kernel<<<blocks, SF_THREADS>>>(
+        volume.data_ptr<float>(), map, (int)batch, (int)nx, (int)ny, (int)nz, M.data_ptr<float>(), b.data_ptr<float>(),
+        views.data_ptr<float>(), view_off.data_ptr<int64_t>(), has_valid ? valid.data_ptr<uint8_t>() : nullptr, has_valid,
+        col_ptr.data_ptr<int64_t>(), col_view.data_ptr<int32_t>(), reinterpret_cast<const float4*>(col_trap.data_ptr<float>()),
+        sino.data_ptr<float>(), n_pix);
+    return sino;
+}
+
+// sino [B, n_pix].  out.dim() == 3 ([nx, ny, n_tot]) -> rolled mode: window bi = slices [z0 + bi*zstep, + nz_win), ACCUMULATED into out
+// (atomicAdd; slices outside out are dropped, never wrapped).  Otherwise stack mode: returns a new [B, nx, ny, nz_win].
+torch::Tensor sf_back_project_3d_col_fused_cuda(
+    torch::Tensor sino, torch::Tensor out, int64_t nx, int64_t ny, int64_t nz_win, int64_t z0, int64_t zstep,
+    torch::Tensor M, torch::Tensor b, torch::Tensor views, torch::Tensor view_off, torch::Tensor valid,
+    torch::Tensor col_ptr, torch::Tensor col_view, torch::Tensor col_trap)
+{
+    TORCH_CHECK(sino.is_cuda() && sino.dtype() == torch::kFloat32 && sino.is_contiguous() && sino.dim() == 2, "sino must be CUDA float32 contiguous [B, n_pix]");
+    sf_check_common(M, b, views, view_off, valid);
+    sf_check_cols(col_ptr, col_view, col_trap, nx * ny);
+    const int64_t batch = sino.size(0), n_pix = sf_n_pix(view_off);
+    TORCH_CHECK(sino.size(1) == n_pix, "sino length does not match the views");
+    TORCH_CHECK(batch >= 1 && batch <= SF_MAXB, "batch must be 1..", SF_MAXB, " per launch (chunk larger batches)");
+    SFBatchMap map; torch::Tensor vol; int atomic_out;
+    if (out.defined() && out.dim() == 3) {
+        TORCH_CHECK(out.is_cuda() && out.dtype() == torch::kFloat32 && out.is_contiguous() && out.size(0) == nx && out.size(1) == ny, "out must be CUDA float32 contiguous [nx, ny, n_tot]");
+        vol = out; const int64_t n_tot = out.size(2);
+        map.bstride = 0; map.zstride = (int)n_tot; map.zdim = (int)n_tot; map.z0 = (int)z0; map.zstep = (int)zstep; atomic_out = 1;
+    } else {
+        vol = torch::zeros({batch, nx, ny, nz_win}, sino.options());
+        map.bstride = nx * ny * nz_win; map.zstride = (int)nz_win; map.zdim = (int)nz_win; map.z0 = 0; map.zstep = 0; atomic_out = 0;
+    }
+    const int64_t total = nx * ny * nz_win;
+    const int blocks = (int)((total + SF_THREADS - 1) / SF_THREADS);
+    const int has_valid = valid.numel() > 0 ? 1 : 0;
+    sf_back_col_fused_kernel<<<blocks, SF_THREADS>>>(
+        sino.data_ptr<float>(), map, (int)batch, atomic_out, (int)nx, (int)ny, (int)nz_win, M.data_ptr<float>(), b.data_ptr<float>(),
         views.data_ptr<float>(), view_off.data_ptr<int64_t>(), has_valid ? valid.data_ptr<uint8_t>() : nullptr, has_valid,
         col_ptr.data_ptr<int64_t>(), col_view.data_ptr<int32_t>(), reinterpret_cast<const float4*>(col_trap.data_ptr<float>()),
         vol.data_ptr<float>(), n_pix);
