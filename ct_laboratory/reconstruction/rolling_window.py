@@ -190,10 +190,41 @@ class RollingWindowOperator:
     def fused(self) -> bool:
         return len(self.devices) == 1 and bool(getattr(self.A, "fused_available", False))
 
+    # ---- fused kernels on several GPUs: the STATIONS are partitioned over the devices (the view-split projector cannot roll), every device
+    # holds its own copy of the window projector (cache included) and its own full-volume accumulator; results are gathered on self.dev.
+    def use_station_split(self, devices):
+        """Partition the stations over `devices` (contiguous ranges) for fwd / adj / normal; needs the fused kernels on a single-GPU projector."""
+        assert self.fused, "station split needs a single-device projector with the column cache"
+        devices = [torch.device(d) for d in devices]; n = min(len(devices), self.R)
+        cuts = [round(self.R * k / n) for k in range(n + 1)]
+        self.station_devices = [(devices[k], cuts[k], cuts[k + 1]) for k in range(n) if cuts[k + 1] > cuts[k]]
+        self.A_by_dev = {d: (self.A if d == self.dev else self.A.clone_to(d)) for d, _, _ in self.station_devices}
+        return self
+
+    def clear_station_split(self):
+        self.station_devices = None; self.A_by_dev = None
+
+    def _split(self):
+        sd = getattr(self, "station_devices", None)
+        return sd if sd and len(sd) > 1 else None
+
+    def _sync_all(self):
+        for d, _, _ in self._split() or []: torch.cuda.synchronize(d)
+
     def fwd(self, x: torch.Tensor) -> torch.Tensor:
         if not self.fused:
             return torch.stack([self.A.forward_project(x[..., j * self.step:j * self.step + self.n_win].contiguous()) for j in range(self.R)])
         x = x.contiguous(); out = torch.empty((self.R, self.n_ray), device=self.dev)
+        if self._split():
+            xs = {d: x.to(d, non_blocking=True) for d, _, _ in self._split()}; parts = {}         # all copies first, then launch on every device
+            for d, j0, j1 in self._split():
+                with torch.cuda.device(d):
+                    o = torch.empty((j1 - j0, self.n_ray), device=d)
+                    for c0 in range(j0, j1, self.chunk):
+                        c1 = min(c0 + self.chunk, j1); o[c0 - j0:c1 - j0] = self.A_by_dev[d].forward_project_rolled(xs[d], c1 - c0, z0=c0 * self.step, zstep=self.step)
+                    parts[d] = (j0, j1, o)
+            for d, (j0, j1, o) in parts.items(): out[j0:j1] = o.to(self.dev)
+            return out
         for j0 in range(0, self.R, self.chunk):
             j1 = min(j0 + self.chunk, self.R); out[j0:j1] = self.A.forward_project_rolled(x, j1 - j0, z0=j0 * self.step, zstep=self.step)
         return out
@@ -203,6 +234,16 @@ class RollingWindowOperator:
         if not self.fused:
             for j in range(self.R):
                 out[..., j * self.step:j * self.step + self.n_win] += self.A.back_project(y[j]).reshape(self.wshape)
+            return out
+        if self._split():
+            ys = {d: y[j0:j1].contiguous().to(d, non_blocking=True) for d, j0, j1 in self._split()}; outs = {}
+            for d, j0, j1 in self._split():
+                with torch.cuda.device(d):
+                    o = torch.zeros(self.shape, device=d)
+                    for c0 in range(j0, j1, self.chunk):
+                        c1 = min(c0 + self.chunk, j1); self.A_by_dev[d].back_project_rolled(ys[d][c0 - j0:c1 - j0], o, z0=c0 * self.step, zstep=self.step)
+                    outs[d] = o
+            for d, o in outs.items(): out += o.to(self.dev)
             return out
         for j0 in range(0, self.R, self.chunk):
             j1 = min(j0 + self.chunk, self.R); self.A.back_project_rolled(y[j0:j1].contiguous(), out, z0=j0 * self.step, zstep=self.step)
@@ -217,6 +258,17 @@ class RollingWindowOperator:
                 out[..., j * self.step:j * self.step + self.n_win] += self.A.back_project(t).reshape(self.wshape)
             return out
         x = x.contiguous()
+        if self._split():
+            xs = {d: x.to(d, non_blocking=True) for d, _, _ in self._split()}; ws = {d: w[j0:j1].to(d, non_blocking=True) for d, j0, j1 in self._split()}; outs = {}
+            for d, j0, j1 in self._split():
+                with torch.cuda.device(d):
+                    o = torch.zeros(self.shape, device=d); A = self.A_by_dev[d]
+                    for c0 in range(j0, j1, self.chunk):
+                        c1 = min(c0 + self.chunk, j1); t = A.forward_project_rolled(xs[d], c1 - c0, z0=c0 * self.step, zstep=self.step); t.mul_(ws[d][c0 - j0:c1 - j0])
+                        A.back_project_rolled(t, o, z0=c0 * self.step, zstep=self.step)
+                    outs[d] = o
+            for d, o in outs.items(): out += o.to(self.dev)
+            return out
         for j0 in range(0, self.R, self.chunk):
             j1 = min(j0 + self.chunk, self.R); t = self.A.forward_project_rolled(x, j1 - j0, z0=j0 * self.step, zstep=self.step); t.mul_(w[j0:j1])
             self.A.back_project_rolled(t, out, z0=j0 * self.step, zstep=self.step)

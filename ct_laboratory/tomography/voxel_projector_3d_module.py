@@ -30,6 +30,7 @@ them produces a sinogram that is element-for-element comparable.
 """
 from __future__ import annotations
 
+import contextlib
 import math
 from typing import Optional
 
@@ -281,6 +282,17 @@ class VoxelProjector3D(Projector3D):
             dst_l.append(dst)
             src_l.append(S[None, :].expand(dst.shape[0], 3))
         return torch.cat(src_l, 0).contiguous(), torch.cat(dst_l, 0).contiguous()
+
+    def clone_to(self, device) -> "VoxelProjector3D":
+        """A copy of this projector (grid, views, valid mask and the precomputed caches) on another device, built under that device."""
+        device = torch.device(device)
+        with torch.cuda.device(device) if device.type == "cuda" else contextlib.nullcontext():
+            valid = self.valid if self.valid.numel() else None
+            op = VoxelProjector3D(self.n_x, self.n_y, self.n_z, self.M, self.b, self.views, valid=valid, device=device, backend=self.backend, cache="none")
+            for k in ("fp_ptr", "fp_idx", "fp_w", "col_ptr", "col_view", "col_trap"):
+                t = getattr(self, k)
+                if t is not None: setattr(op, k, t.to(device))
+        op.meta = getattr(self, "meta", {}); return op
 
     # ------------------------------------------------------------- save / load
     def save(self, path: str, **meta) -> None:
