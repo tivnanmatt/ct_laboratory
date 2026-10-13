@@ -279,6 +279,24 @@ class VoxelProjector3D(Projector3D):
             src_l.append(S[None, :].expand(dst.shape[0], 3))
         return torch.cat(src_l, 0).contiguous(), torch.cat(dst_l, 0).contiguous()
 
+    # ------------------------------------------------------------- save / load
+    def save(self, path: str, **meta) -> None:
+        """Write the whole operator (grid, views, valid mask and the precomputed cache) to one .pt file; meta is stored alongside.
+        VoxelProjector3D.load rebuilds it without recomputing the cache."""
+        torch.save(dict(format="ct_laboratory.VoxelProjector3D/1", n_x=self.n_x, n_y=self.n_y, n_z=self.n_z, backend=self.backend,
+                        buffers={k: (None if v is None else v.detach().cpu()) for k, v in self._buffers.items()}, meta=meta), path)
+
+    @classmethod
+    def load(cls, path: str, device=None) -> "VoxelProjector3D":
+        """Rebuild a projector written by save() on device (default: the first CUDA device, else the CPU)."""
+        d = torch.load(path, map_location="cpu", weights_only=False)
+        assert d.get("format", "").startswith("ct_laboratory.VoxelProjector3D/"), f"{path} is not a saved VoxelProjector3D"
+        b = d["buffers"]; valid = b["valid"] if b["valid"] is not None and b["valid"].numel() else None
+        op = cls(d["n_x"], d["n_y"], d["n_z"], b["M"], b["b"], b["views"], valid=valid, device=device, backend=d["backend"], cache="none")
+        for k in ("fp_ptr", "fp_idx", "fp_w", "col_ptr", "col_view", "col_trap"):
+            if b.get(k) is not None: setattr(op, k, b[k].to(op.M.device))
+        op.meta = d.get("meta", {}); return op
+
     # ---------------------------------------------------------- footprints
     def precompute_footprints(self) -> int:
         """Build per-voxel CSR (pixel index, weight) lists. Returns nnz."""
