@@ -358,6 +358,9 @@ class VoxelProjector3D(Projector3D):
     def _fused_args(self):
         return (self.M, self.b, self.views, self.view_off, self.valid, self.col_ptr, self.col_view, self.col_trap)
 
+    forward_replicas = 1   # sinogram copies for the fused forward scatter, summed afterwards
+    forward_replica_mode = 0   # 0: replica = slice index mod replicas; 1: depth along the ray; 2: slice + depth
+
     def forward_project_batched(self, volumes: torch.Tensor) -> torch.Tensor:
         """``[B, X, Y, Z] -> [B, n_pix]``: the same projector applied to every volume, with each voxel's footprint computed once for the
         whole batch (chunks of SF_MAXB).  Falls back to one projection per volume without the column cache."""
@@ -366,7 +369,7 @@ class VoxelProjector3D(Projector3D):
             return torch.stack([self.forward(v) for v in volumes])
         out = torch.empty((volumes.shape[0], self.n_pix), device=volumes.device, dtype=torch.float32)
         for b0 in range(0, volumes.shape[0], SF_MAXB):
-            out[b0:b0 + SF_MAXB] = sf_forward_project_3d_col_fused_cuda(volumes[b0:b0 + SF_MAXB], *self._fused_args())
+            out[b0:b0 + SF_MAXB] = sf_forward_project_3d_col_fused_cuda(volumes[b0:b0 + SF_MAXB], *self._fused_args(), replicas=self.forward_replicas, replica_mode=self.forward_replica_mode, n_pix=self.n_pix)
         return out
 
     def back_project_batched(self, sinograms: torch.Tensor) -> torch.Tensor:
@@ -376,7 +379,7 @@ class VoxelProjector3D(Projector3D):
             return torch.stack([self.back_project(y) for y in sinograms])
         out = torch.empty((sinograms.shape[0], self.n_x, self.n_y, self.n_z), device=sinograms.device, dtype=torch.float32)
         for b0 in range(0, sinograms.shape[0], SF_MAXB):
-            out[b0:b0 + SF_MAXB] = sf_back_project_3d_col_fused_cuda(sinograms[b0:b0 + SF_MAXB], *self._fused_args(), self.n_x, self.n_y, self.n_z)
+            out[b0:b0 + SF_MAXB] = sf_back_project_3d_col_fused_cuda(sinograms[b0:b0 + SF_MAXB], *self._fused_args(), self.n_x, self.n_y, self.n_z, n_pix=self.n_pix)
         return out
 
     def forward_project_rolled(self, volume: torch.Tensor, batch: int, z0: int = 0, zstep: int = 1) -> torch.Tensor:
@@ -396,7 +399,7 @@ class VoxelProjector3D(Projector3D):
         out = torch.empty((batch, self.n_pix), device=volume.device, dtype=torch.float32)
         for b0 in range(0, batch, SF_MAXB):
             nb = min(SF_MAXB, batch - b0)
-            out[b0:b0 + nb] = sf_forward_project_3d_col_fused_cuda(volume, *self._fused_args(), batch=nb, nz_win=self.n_z, z0=z0 + b0 * zstep, zstep=zstep)
+            out[b0:b0 + nb] = sf_forward_project_3d_col_fused_cuda(volume, *self._fused_args(), batch=nb, nz_win=self.n_z, z0=z0 + b0 * zstep, zstep=zstep, replicas=self.forward_replicas, replica_mode=self.forward_replica_mode, n_pix=self.n_pix)
         return out
 
     def back_project_rolled(self, sinograms: torch.Tensor, out: torch.Tensor, z0: int = 0, zstep: int = 1) -> torch.Tensor:
@@ -412,7 +415,7 @@ class VoxelProjector3D(Projector3D):
             return out
         for b0 in range(0, sinograms.shape[0], SF_MAXB):
             nb = min(SF_MAXB, sinograms.shape[0] - b0)
-            sf_back_project_3d_col_fused_cuda(sinograms[b0:b0 + nb], *self._fused_args(), self.n_x, self.n_y, self.n_z, out=out, z0=z0 + b0 * zstep, zstep=zstep)
+            sf_back_project_3d_col_fused_cuda(sinograms[b0:b0 + nb], *self._fused_args(), self.n_x, self.n_y, self.n_z, out=out, z0=z0 + b0 * zstep, zstep=zstep, n_pix=self.n_pix)
         return out
 
     def back_project(self, sinogram: torch.Tensor) -> torch.Tensor:

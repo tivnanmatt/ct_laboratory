@@ -143,15 +143,18 @@ def sf_back_project_3d_col_cuda(sino, M, b, views, view_off, valid, col_ptr, col
 SF_MAXB = 16   # batch elements per fused launch (register arrays in the kernels); chunk larger batches
 
 
-def sf_forward_project_3d_col_fused_cuda(volume, M, b, views, view_off, valid, col_ptr, col_view, col_trap, batch=1, nz_win=0, z0=0, zstep=0):
+def sf_forward_project_3d_col_fused_cuda(volume, M, b, views, view_off, valid, col_ptr, col_view, col_trap, batch=1, nz_win=0, z0=0, zstep=0, replicas=1, replica_mode=0, n_pix=0):
     """One footprint per voxel for a whole batch.  volume [B, X, Y, Z] (stack; batch = B) or [X, Y, Z_tot] (rolled: `batch` windows of
-    `nz_win` slices, window i = slices [z0 + i*zstep, ...); slices outside the volume are zero, never wrapped).  Returns [batch, n_pix]."""
+    `nz_win` slices, window i = slices [z0 + i*zstep, ...); slices outside the volume are zero, never wrapped).  Returns [batch, n_pix].
+    replicas > 1: slice k of a column scatters into sinogram copy k mod replicas (fewer atomic collisions between neighbouring slices); the copies
+    are summed before returning (memory: replicas x batch x n_pix floats).  replica_mode: 0 = slice index, 1 = depth along the ray (voxel lengths),
+    2 = slice + depth."""
     M, b, views, view_off, valid = _geometry_args(M, b, views, view_off, valid)
     volume = _f32c(volume, "volume")
-    return _C.sf_forward_project_3d_col_fused_cuda(volume, int(batch), int(nz_win), int(z0), int(zstep), M, b, views, view_off, valid, col_ptr, col_view, col_trap)
+    return _C.sf_forward_project_3d_col_fused_cuda(volume, int(batch), int(nz_win), int(z0), int(zstep), M, b, views, view_off, valid, col_ptr, col_view, col_trap, int(replicas), int(replica_mode), int(n_pix) or int(view_off[-1]))
 
 
-def sf_back_project_3d_col_fused_cuda(sino, M, b, views, view_off, valid, col_ptr, col_view, col_trap, n_x, n_y, n_z, out=None, z0=0, zstep=0):
+def sf_back_project_3d_col_fused_cuda(sino, M, b, views, view_off, valid, col_ptr, col_view, col_trap, n_x, n_y, n_z, out=None, z0=0, zstep=0, n_pix=0):
     """Fused back projection of sino [B, n_pix].  out [X, Y, Z_tot] -> rolled: window i = slices [z0 + i*zstep, + n_z), ACCUMULATED into out
     (returned); out None -> stack: returns a new [B, X, Y, n_z]."""
     M, b, views, view_off, valid = _geometry_args(M, b, views, view_off, valid)
@@ -159,4 +162,4 @@ def sf_back_project_3d_col_fused_cuda(sino, M, b, views, view_off, valid, col_pt
     if sino.dim() == 1:
         sino = sino[None]
     o = torch.empty(0, device=sino.device, dtype=torch.float32) if out is None else out
-    return _C.sf_back_project_3d_col_fused_cuda(sino, o, int(n_x), int(n_y), int(n_z), int(z0), int(zstep), M, b, views, view_off, valid, col_ptr, col_view, col_trap)
+    return _C.sf_back_project_3d_col_fused_cuda(sino, o, int(n_x), int(n_y), int(n_z), int(z0), int(zstep), M, b, views, view_off, valid, col_ptr, col_view, col_trap, int(n_pix) or int(view_off[-1]))

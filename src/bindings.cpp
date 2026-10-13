@@ -90,9 +90,9 @@ torch::Tensor sf_back_project_3d_col_cuda(torch::Tensor sino, torch::Tensor M, t
     torch::Tensor col_ptr, torch::Tensor col_view, torch::Tensor col_trap, int64_t nx, int64_t ny, int64_t nz);
 
 torch::Tensor sf_forward_project_3d_col_fused_cuda(torch::Tensor volume, int64_t batch, int64_t nz_win, int64_t z0, int64_t zstep,
-    torch::Tensor M, torch::Tensor b, torch::Tensor views, torch::Tensor view_off, torch::Tensor valid, torch::Tensor col_ptr, torch::Tensor col_view, torch::Tensor col_trap);
+    torch::Tensor M, torch::Tensor b, torch::Tensor views, torch::Tensor view_off, torch::Tensor valid, torch::Tensor col_ptr, torch::Tensor col_view, torch::Tensor col_trap, int64_t n_rep, int64_t rep_mode, int64_t n_pix);
 torch::Tensor sf_back_project_3d_col_fused_cuda(torch::Tensor sino, torch::Tensor out, int64_t nx, int64_t ny, int64_t nz_win, int64_t z0, int64_t zstep,
-    torch::Tensor M, torch::Tensor b, torch::Tensor views, torch::Tensor view_off, torch::Tensor valid, torch::Tensor col_ptr, torch::Tensor col_view, torch::Tensor col_trap);
+    torch::Tensor M, torch::Tensor b, torch::Tensor views, torch::Tensor view_off, torch::Tensor valid, torch::Tensor col_ptr, torch::Tensor col_view, torch::Tensor col_trap, int64_t n_pix);
 
 
 /* ========================================================================== */

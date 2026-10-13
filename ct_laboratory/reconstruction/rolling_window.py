@@ -184,7 +184,16 @@ class RollingWindowOperator:
     # kernels (single GPU, VoxelProjector3D with cache='column') the rotations go through the projector in chunks of `chunk`: each voxel's
     # footprint is computed once per chunk instead of once per rotation.  The volume is sized so every window lies inside it; the kernels
     # zero-pad anything outside and never wrap.  Multi-GPU or other caches: one window at a time (same result).
-    chunk = 16
+    chunk_fwd = 4      # stations per fused FORWARD launch (scatter with atomics: small batches keep the occupancy up; 4-8 best at 512)
+    chunk_back = 16    # stations per fused BACK launch (gather: the widest batch is best)
+
+    @property
+    def chunk(self):   # kept for callers that set one chunk size for both
+        return self.chunk_back
+
+    @chunk.setter
+    def chunk(self, v):
+        self.chunk_fwd = self.chunk_back = int(v)
 
     @property
     def fused(self) -> bool:
@@ -220,13 +229,13 @@ class RollingWindowOperator:
             for d, j0, j1 in self._split():
                 with torch.cuda.device(d):
                     o = torch.empty((j1 - j0, self.n_ray), device=d)
-                    for c0 in range(j0, j1, self.chunk):
-                        c1 = min(c0 + self.chunk, j1); o[c0 - j0:c1 - j0] = self.A_by_dev[d].forward_project_rolled(xs[d], c1 - c0, z0=c0 * self.step, zstep=self.step)
+                    for c0 in range(j0, j1, self.chunk_fwd):
+                        c1 = min(c0 + self.chunk_fwd, j1); o[c0 - j0:c1 - j0] = self.A_by_dev[d].forward_project_rolled(xs[d], c1 - c0, z0=c0 * self.step, zstep=self.step)
                     parts[d] = (j0, j1, o)
             for d, (j0, j1, o) in parts.items(): out[j0:j1] = o.to(self.dev)
             return out
-        for j0 in range(0, self.R, self.chunk):
-            j1 = min(j0 + self.chunk, self.R); out[j0:j1] = self.A.forward_project_rolled(x, j1 - j0, z0=j0 * self.step, zstep=self.step)
+        for j0 in range(0, self.R, self.chunk_fwd):
+            j1 = min(j0 + self.chunk_fwd, self.R); out[j0:j1] = self.A.forward_project_rolled(x, j1 - j0, z0=j0 * self.step, zstep=self.step)
         return out
 
     def adj(self, y: torch.Tensor) -> torch.Tensor:
@@ -240,13 +249,13 @@ class RollingWindowOperator:
             for d, j0, j1 in self._split():
                 with torch.cuda.device(d):
                     o = torch.zeros(self.shape, device=d)
-                    for c0 in range(j0, j1, self.chunk):
-                        c1 = min(c0 + self.chunk, j1); self.A_by_dev[d].back_project_rolled(ys[d][c0 - j0:c1 - j0], o, z0=c0 * self.step, zstep=self.step)
+                    for c0 in range(j0, j1, self.chunk_back):
+                        c1 = min(c0 + self.chunk_back, j1); self.A_by_dev[d].back_project_rolled(ys[d][c0 - j0:c1 - j0], o, z0=c0 * self.step, zstep=self.step)
                     outs[d] = o
             for d, o in outs.items(): out += o.to(self.dev)
             return out
-        for j0 in range(0, self.R, self.chunk):
-            j1 = min(j0 + self.chunk, self.R); self.A.back_project_rolled(y[j0:j1].contiguous(), out, z0=j0 * self.step, zstep=self.step)
+        for j0 in range(0, self.R, self.chunk_back):
+            j1 = min(j0 + self.chunk_back, self.R); self.A.back_project_rolled(y[j0:j1].contiguous(), out, z0=j0 * self.step, zstep=self.step)
         return out
 
     def normal(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
@@ -263,16 +272,23 @@ class RollingWindowOperator:
             for d, j0, j1 in self._split():
                 with torch.cuda.device(d):
                     o = torch.zeros(self.shape, device=d); A = self.A_by_dev[d]
-                    for c0 in range(j0, j1, self.chunk):
-                        c1 = min(c0 + self.chunk, j1); t = A.forward_project_rolled(xs[d], c1 - c0, z0=c0 * self.step, zstep=self.step); t.mul_(ws[d][c0 - j0:c1 - j0])
+                    for c0 in range(j0, j1, self.chunk_back):
+                        c1 = min(c0 + self.chunk_back, j1); t = self._fwd_chunked(A, xs[d], c0, c1); t.mul_(ws[d][c0 - j0:c1 - j0])
                         A.back_project_rolled(t, o, z0=c0 * self.step, zstep=self.step)
                     outs[d] = o
             for d, o in outs.items(): out += o.to(self.dev)
             return out
-        for j0 in range(0, self.R, self.chunk):
-            j1 = min(j0 + self.chunk, self.R); t = self.A.forward_project_rolled(x, j1 - j0, z0=j0 * self.step, zstep=self.step); t.mul_(w[j0:j1])
+        for j0 in range(0, self.R, self.chunk_back):
+            j1 = min(j0 + self.chunk_back, self.R); t = self._fwd_chunked(self.A, x, j0, j1); t.mul_(w[j0:j1])
             self.A.back_project_rolled(t, out, z0=j0 * self.step, zstep=self.step)
         return out
+
+    def _fwd_chunked(self, A, x, j0, j1):
+        """forward projection of stations [j0, j1) in pieces of chunk_fwd (the back projection takes them all at once)"""
+        t = torch.empty((j1 - j0, self.n_ray), device=x.device)
+        for c0 in range(j0, j1, self.chunk_fwd):
+            c1 = min(c0 + self.chunk_fwd, j1); t[c0 - j0:c1 - j0] = A.forward_project_rolled(x, c1 - c0, z0=c0 * self.step, zstep=self.step)
+        return t
 
     def normal_loop(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
         """the per-rotation version of :meth:`normal` (reference / timing)"""
