@@ -1,7 +1,8 @@
 """GPU eigensolvers for SparseEigenDecomposition (optional dependency: ``pip install ct_laboratory[gpu]`` = cupy-cuda12x).
 
 ``cupy_eigsh``: CuPy's thick-restart Lanczos (``cupyx.scipy.sparse.linalg.eigsh``) on the matrix-free Gram operator.
-The Lanczos basis, its re-orthogonalization and the Rayleigh-Ritz step all stay on the GPU; the Gram matvec is the
+The Lanczos basis, its re-orthogonalization and the Rayleigh-Ritz step all stay on the GPU (cupyx's host Ritz solve is
+swapped for ``_gpu_solve_ritz``); the Gram matvec is the
 same torch operator as the ARPACK path, handed between CuPy and torch zero-copy via DLPack.  Same interface and
 outputs as ``eigsh`` (top-k eigenpairs of G = A^T A, descending).
 
@@ -25,6 +26,29 @@ def cupy_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def _gpu_solve_ritz(alpha, beta, beta_k, k, which):
+    """GPU replacement for cupyx's ``_eigsh_solve_ritz``, which builds the (ncv x ncv) projected matrix and diagonalises it with
+    numpy on the host.  At large k (ncv ~ 2k, e.g. 4863 at k = 2431) that is a multi-threaded dense eigh per restart that saturates
+    every CPU core for minutes while the GPU idles (it hard-reset axis03 three times, 2026-10-13/14).  Same maths, cupy.linalg.eigh
+    in float64 on the device."""
+    import cupy as cp
+    a = cp.asarray(alpha, dtype=cp.float64); b = cp.asarray(beta, dtype=cp.float64)
+    t = cp.diag(a) + cp.diag(b[:-1], k=1) + cp.diag(b[:-1], k=-1)
+    if beta_k is not None:
+        bk = cp.asarray(beta_k, dtype=cp.float64); t[k, :k] = bk; t[:k, k] = bk
+    w, s = cp.linalg.eigh(t)
+    if which == "LA":
+        idx = cp.argsort(w)[-k:]
+    elif which == "LM":
+        idx = cp.argsort(cp.abs(w))[-k:]
+    elif which == "SA":
+        idx = cp.argsort(w)[:k]
+    else:
+        raise ValueError(f"which={which!r} not supported")
+    dt = cp.asarray(alpha).dtype
+    return w[idx].astype(dt), s[:, idx].astype(dt)
 
 
 def _solve_cupy_eigsh(self, gram, N, k, tol=1e-3, maxiter=5000, seed=42, ncv=None, verbose=False, use_tqdm=True, **_ignored):
@@ -55,7 +79,12 @@ def _solve_cupy_eigsh(self, gram, N, k, tol=1e-3, maxiter=5000, seed=42, ncv=Non
         ncv = ncv if ncv is not None else min(N - 1, max(20, 2 * k + 1))
         t0 = time.time()
         gc.collect(); torch.cuda.empty_cache()                                   # hand PyTorch's reserved-but-free blocks to the CuPy pool
-        w, V = eigsh(op, k=k, which="LM", ncv=ncv, v0=v0, tol=tol, maxiter=maxiter, return_eigenvectors=True)
+        import cupyx.scipy.sparse.linalg._eigen as _eig                           # Rayleigh-Ritz on the GPU, not numpy on the host
+        _host_ritz = _eig._eigsh_solve_ritz; _eig._eigsh_solve_ritz = _gpu_solve_ritz
+        try:
+            w, V = eigsh(op, k=k, which="LM", ncv=ncv, v0=v0, tol=tol, maxiter=maxiter, return_eigenvectors=True)
+        finally:
+            _eig._eigsh_solve_ritz = _host_ritz
         order = cp.argsort(w)[::-1]
         s2 = torch.from_dlpack(cp.ascontiguousarray(cp.clip(w[order], 0.0, None))).to(dt).clone()
         Vt = torch.from_dlpack(cp.ascontiguousarray(V[:, order])).to(dt).clone()
