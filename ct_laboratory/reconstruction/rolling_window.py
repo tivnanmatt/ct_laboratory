@@ -210,10 +210,21 @@ class RollingWindowOperator:
         cuts = [round(self.R * k / n) for k in range(n + 1)]
         self.station_devices = [(devices[k], cuts[k], cuts[k + 1]) for k in range(n) if cuts[k + 1] > cuts[k]]
         self.A_by_dev = {d: (self.A if d == self.dev else self.A.clone_to(d)) for d, _, _ in self.station_devices}
+        from concurrent.futures import ThreadPoolExecutor
+        self._pool = ThreadPoolExecutor(len(self.station_devices), thread_name_prefix="station-split")   # one host thread per GPU (2026-10-19)
         return self
 
+    def _run_split(self, fn):
+        """fn(d, j0, j1) on every device of the split, each in its own host thread: a device's chunk loop blocks the host while its GPU
+        works, so launching the devices one after another from one thread ran them in turn (1.06x on 4 GPUs); threads give ~3.5-4x."""
+        def call(d, j0, j1):
+            with torch.cuda.device(d):
+                r = fn(d, j0, j1); torch.cuda.synchronize(d); return d, j0, j1, r
+        return [f.result() for f in [self._pool.submit(call, d, j0, j1) for d, j0, j1 in self._split()]]
+
     def clear_station_split(self):
-        self.station_devices = None; self.A_by_dev = None
+        if getattr(self, "_pool", None) is not None: self._pool.shutdown(wait=False)
+        self.station_devices = None; self.A_by_dev = None; self._pool = None
 
     def _split(self):
         sd = getattr(self, "station_devices", None)
@@ -227,14 +238,13 @@ class RollingWindowOperator:
             return torch.stack([self.A.forward_project(x[..., j * self.step:j * self.step + self.n_win].contiguous()) for j in range(self.R)])
         x = x.contiguous(); out = torch.empty((self.R, self.n_ray), device=self.dev)
         if self._split():
-            xs = {d: x.to(d, non_blocking=True) for d, _, _ in self._split()}; parts = {}         # all copies first, then launch on every device
-            for d, j0, j1 in self._split():
-                with torch.cuda.device(d):
-                    o = torch.empty((j1 - j0, self.n_ray), device=d)
-                    for c0 in range(j0, j1, self.chunk_fwd):
-                        c1 = min(c0 + self.chunk_fwd, j1); o[c0 - j0:c1 - j0] = self.A_by_dev[d].forward_project_rolled(xs[d], c1 - c0, z0=c0 * self.step, zstep=self.step)
-                    parts[d] = (j0, j1, o)
-            for d, (j0, j1, o) in parts.items(): out[j0:j1] = o.to(self.dev)
+            xs = {d: x.to(d) for d, _, _ in self._split()}
+            def part(d, j0, j1):
+                o = torch.empty((j1 - j0, self.n_ray), device=d)
+                for c0 in range(j0, j1, self.chunk_fwd):
+                    c1 = min(c0 + self.chunk_fwd, j1); o[c0 - j0:c1 - j0] = self.A_by_dev[d].forward_project_rolled(xs[d], c1 - c0, z0=c0 * self.step, zstep=self.step)
+                return o
+            for d, j0, j1, o in self._run_split(part): out[j0:j1] = o.to(self.dev)
             return out
         for j0 in range(0, self.R, self.chunk_fwd):
             j1 = min(j0 + self.chunk_fwd, self.R); out[j0:j1] = self.A.forward_project_rolled(x, j1 - j0, z0=j0 * self.step, zstep=self.step)
@@ -247,14 +257,13 @@ class RollingWindowOperator:
                 out[..., j * self.step:j * self.step + self.n_win] += self.A.back_project(y[j]).reshape(self.wshape)
             return out
         if self._split():
-            ys = {d: y[j0:j1].contiguous().to(d, non_blocking=True) for d, j0, j1 in self._split()}; outs = {}
-            for d, j0, j1 in self._split():
-                with torch.cuda.device(d):
-                    o = torch.zeros(self.shape, device=d)
-                    for c0 in range(j0, j1, self.chunk_back):
-                        c1 = min(c0 + self.chunk_back, j1); self.A_by_dev[d].back_project_rolled(ys[d][c0 - j0:c1 - j0], o, z0=c0 * self.step, zstep=self.step)
-                    outs[d] = o
-            for d, o in outs.items(): out += o.to(self.dev)
+            ys = {d: y[j0:j1].contiguous().to(d) for d, j0, j1 in self._split()}
+            def part(d, j0, j1):
+                o = torch.zeros(self.shape, device=d)
+                for c0 in range(j0, j1, self.chunk_back):
+                    c1 = min(c0 + self.chunk_back, j1); self.A_by_dev[d].back_project_rolled(ys[d][c0 - j0:c1 - j0], o, z0=c0 * self.step, zstep=self.step)
+                return o
+            for d, j0, j1, o in self._run_split(part): out += o.to(self.dev)
             return out
         for j0 in range(0, self.R, self.chunk_back):
             j1 = min(j0 + self.chunk_back, self.R); self.A.back_project_rolled(y[j0:j1].contiguous(), out, z0=j0 * self.step, zstep=self.step)
@@ -270,15 +279,14 @@ class RollingWindowOperator:
             return out
         x = x.contiguous()
         if self._split():
-            xs = {d: x.to(d, non_blocking=True) for d, _, _ in self._split()}; ws = {d: w[j0:j1].to(d, non_blocking=True) for d, j0, j1 in self._split()}; outs = {}
-            for d, j0, j1 in self._split():
-                with torch.cuda.device(d):
-                    o = torch.zeros(self.shape, device=d); A = self.A_by_dev[d]
-                    for c0 in range(j0, j1, self.chunk_back):
-                        c1 = min(c0 + self.chunk_back, j1); t = self._fwd_chunked(A, xs[d], c0, c1); t.mul_(ws[d][c0 - j0:c1 - j0])
-                        A.back_project_rolled(t, o, z0=c0 * self.step, zstep=self.step)
-                    outs[d] = o
-            for d, o in outs.items(): out += o.to(self.dev)
+            xs = {d: x.to(d) for d, _, _ in self._split()}; ws = {d: w[j0:j1].to(d) for d, j0, j1 in self._split()}
+            def part(d, j0, j1):
+                o = torch.zeros(self.shape, device=d); A = self.A_by_dev[d]
+                for c0 in range(j0, j1, self.chunk_back):
+                    c1 = min(c0 + self.chunk_back, j1); t = self._fwd_chunked(A, xs[d], c0, c1); t.mul_(ws[d][c0 - j0:c1 - j0])
+                    A.back_project_rolled(t, o, z0=c0 * self.step, zstep=self.step)
+                return o
+            for d, j0, j1, o in self._run_split(part): out += o.to(self.dev)
             return out
         for j0 in range(0, self.R, self.chunk_back):
             j1 = min(j0 + self.chunk_back, self.R); t = self._fwd_chunked(self.A, x, j0, j1); t.mul_(w[j0:j1])
