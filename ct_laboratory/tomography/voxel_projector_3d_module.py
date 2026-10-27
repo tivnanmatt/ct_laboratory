@@ -340,12 +340,12 @@ class VoxelProjector3D(Projector3D):
         """A copy of this projector (grid, views, valid mask and the precomputed caches) on another device, built under that device."""
         device = torch.device(device)
         with torch.cuda.device(device) if device.type == "cuda" else contextlib.nullcontext():
-            valid = self.valid if self.valid.numel() else None
-            op = VoxelProjector3D(self.n_x, self.n_y, self.n_z, self.M, self.b, self.views, valid=valid, device=device, backend=self.backend, cache="none",
-                                  voxel_mask=self.col_mask.view(self.n_x, self.n_y).bool() if self.has_mask else None)
+            valid = self.valid.cpu() if self.valid.numel() else None                                   # staged through the host: direct peer copies can be broken (RunPod 6000 Ada)
+            op = VoxelProjector3D(self.n_x, self.n_y, self.n_z, self.M.cpu(), self.b.cpu(), self.views.cpu(), valid=valid, device=device, backend=self.backend, cache="none",
+                                  voxel_mask=self.col_mask.view(self.n_x, self.n_y).bool().cpu() if self.has_mask else None)
             for k in ("fp_ptr", "fp_idx", "fp_w", "col_ptr", "col_view", "col_trap"):
                 t = getattr(self, k)
-                if t is not None: setattr(op, k, t.to(device))
+                if t is not None: setattr(op, k, t.cpu().to(device))
         op.meta = getattr(self, "meta", {}); return op
 
     # ------------------------------------------------------------- save / load

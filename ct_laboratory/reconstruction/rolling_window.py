@@ -31,6 +31,23 @@ __all__ = ["StepAndShootGeometry", "ProjectorSpec", "decimate", "RollingWindowOp
 
 
 # ------------------------------------------------------------------ geometry
+
+_P2P_OK = {}
+
+
+def _xdev(t, d):
+    """t on device d; GPU -> GPU through the host when a direct peer copy is found broken (checked once per device pair)"""
+    d = torch.device(d)
+    if t.device == d: return t
+    if t.device.type == "cuda" and d.type == "cuda":
+        k = (t.device.index, d.index)
+        if k not in _P2P_OK and (__import__("os").environ.get("CTLAB_NO_P2P") == "1" or __import__("os").path.exists("/etc/ctlab_no_p2p")): _P2P_OK[k] = False      # never try a direct copy (it can enable broken peer mappings)
+        if k not in _P2P_OK:
+            a = torch.arange(4096, dtype=torch.float32, device=t.device); _P2P_OK[k] = bool(torch.equal(a.to(d).cpu(), a.cpu()))
+        if not _P2P_OK[k]: return t.cpu().to(d)
+    return t.to(d)
+
+
 @dataclass
 class StepAndShootGeometry:
     """Views of ONE rotation at full detector resolution, plus the stepping.
@@ -238,13 +255,13 @@ class RollingWindowOperator:
             return torch.stack([self.A.forward_project(x[..., j * self.step:j * self.step + self.n_win].contiguous()) for j in range(self.R)])
         x = x.contiguous(); out = torch.empty((self.R, self.n_ray), device=self.dev)
         if self._split():
-            xs = {d: x.to(d) for d, _, _ in self._split()}
+            xs = {d: _xdev(x, d) for d, _, _ in self._split()}
             def part(d, j0, j1):
                 o = torch.empty((j1 - j0, self.n_ray), device=d)
                 for c0 in range(j0, j1, self.chunk_fwd):
                     c1 = min(c0 + self.chunk_fwd, j1); o[c0 - j0:c1 - j0] = self.A_by_dev[d].forward_project_rolled(xs[d], c1 - c0, z0=c0 * self.step, zstep=self.step)
                 return o
-            for d, j0, j1, o in self._run_split(part): out[j0:j1] = o.to(self.dev)
+            for d, j0, j1, o in self._run_split(part): out[j0:j1] = _xdev(o, self.dev)
             return out
         for j0 in range(0, self.R, self.chunk_fwd):
             j1 = min(j0 + self.chunk_fwd, self.R); out[j0:j1] = self.A.forward_project_rolled(x, j1 - j0, z0=j0 * self.step, zstep=self.step)
@@ -257,13 +274,13 @@ class RollingWindowOperator:
                 out[..., j * self.step:j * self.step + self.n_win] += self.A.back_project(y[j]).reshape(self.wshape)
             return out
         if self._split():
-            ys = {d: y[j0:j1].contiguous().to(d) for d, j0, j1 in self._split()}
+            ys = {d: _xdev(y[j0:j1].contiguous(), d) for d, j0, j1 in self._split()}
             def part(d, j0, j1):
                 o = torch.zeros(self.shape, device=d)
                 for c0 in range(j0, j1, self.chunk_back):
                     c1 = min(c0 + self.chunk_back, j1); self.A_by_dev[d].back_project_rolled(ys[d][c0 - j0:c1 - j0], o, z0=c0 * self.step, zstep=self.step)
                 return o
-            for d, j0, j1, o in self._run_split(part): out += o.to(self.dev)
+            for d, j0, j1, o in self._run_split(part): out += _xdev(o, self.dev)
             return out
         for j0 in range(0, self.R, self.chunk_back):
             j1 = min(j0 + self.chunk_back, self.R); self.A.back_project_rolled(y[j0:j1].contiguous(), out, z0=j0 * self.step, zstep=self.step)
@@ -279,14 +296,14 @@ class RollingWindowOperator:
             return out
         x = x.contiguous()
         if self._split():
-            xs = {d: x.to(d) for d, _, _ in self._split()}; ws = {d: w[j0:j1].to(d) for d, j0, j1 in self._split()}
+            xs = {d: _xdev(x, d) for d, _, _ in self._split()}; ws = {d: _xdev(w[j0:j1], d) for d, j0, j1 in self._split()}
             def part(d, j0, j1):
                 o = torch.zeros(self.shape, device=d); A = self.A_by_dev[d]
                 for c0 in range(j0, j1, self.chunk_back):
                     c1 = min(c0 + self.chunk_back, j1); t = self._fwd_chunked(A, xs[d], c0, c1); t.mul_(ws[d][c0 - j0:c1 - j0])
                     A.back_project_rolled(t, o, z0=c0 * self.step, zstep=self.step)
                 return o
-            for d, j0, j1, o in self._run_split(part): out += o.to(self.dev)
+            for d, j0, j1, o in self._run_split(part): out += _xdev(o, self.dev)
             return out
         for j0 in range(0, self.R, self.chunk_back):
             j1 = min(j0 + self.chunk_back, self.R); t = self._fwd_chunked(self.A, x, j0, j1); t.mul_(w[j0:j1])
